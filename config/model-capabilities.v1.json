@@ -1,0 +1,52 @@
+{
+  "version": "2026-07-10",
+  "provider": "openai",
+  "documentation_url": "https://developers.openai.com/api/docs/guides/latest-model",
+  "models": [
+    {
+      "id": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "family": "gpt-5.5",
+      "variant": "flagship",
+      "release_stage": "general_availability",
+      "description": "Flagship model for complex reasoning and professional work.",
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    {
+      "id": "gpt-5.6",
+      "display_name": "GPT-5.6 (Sol alias)",
+      "family": "gpt-5.6",
+      "variant": "alias",
+      "release_stage": "preview",
+      "description": "Official GPT-5.6 alias that routes to GPT-5.6 Sol.",
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "display_name": "GPT-5.6 Sol",
+      "family": "gpt-5.6",
+      "variant": "sol",
+      "release_stage": "preview",
+      "description": "GPT-5.6 variant for flagship capability.",
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "display_name": "GPT-5.6 Terra",
+      "family": "gpt-5.6",
+      "variant": "terra",
+      "release_stage": "preview",
+      "description": "GPT-5.6 variant balancing intelligence and cost.",
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "display_name": "GPT-5.6 Luna",
+      "family": "gpt-5.6",
+      "variant": "luna",
+      "release_stage": "preview",
+      "description": "GPT-5.6 variant for efficient, high-volume workloads.",
+      "reasoning_efforts": ["low", "medium", "high"]
+    }
+  ]
+}

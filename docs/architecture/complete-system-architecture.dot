@@ -1,0 +1,107 @@
+digraph thy_agentic_rag_system {
+  graph [
+    rankdir=TB,
+    newrank=true,
+    compound=true,
+    bgcolor="white",
+    fontname="Helvetica",
+    fontsize=22,
+    label="THY-Branded Agentic RAG — Complete System Architecture",
+    labelloc="t",
+    labeljust="l",
+    pad=0.35,
+    nodesep=0.48,
+    ranksep=0.95,
+    splines=spline
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=11,
+    color="#CBD5E1",
+    fillcolor="#FFFFFF",
+    fontcolor="#14213D",
+    penwidth=1.2,
+    margin="0.15,0.10"
+  ];
+  edge [
+    fontname="Helvetica",
+    fontsize=9,
+    color="#64748B",
+    fontcolor="#475569",
+    arrowsize=0.7,
+    penwidth=1.1
+  ];
+
+  user [label="Browser user", shape=oval, fillcolor="#FFF5F5", color="#C8102E"];
+
+  subgraph cluster_frontend {
+    label="Frontend";
+    color="#E2E8F0";
+    style="rounded";
+    react [label="React 19 + TypeScript\nTailwind + TanStack Query + Zustand", fillcolor="#FFF5F5", color="#C8102E"];
+    nginx [label="Nginx\nStatic delivery + API proxy"];
+    streamlit [label="Optional Streamlit\nCompatibility interface", style="rounded,dashed,filled", fillcolor="#F8FAFC"];
+    react -> nginx;
+  }
+
+  subgraph cluster_backend {
+    label="FastAPI application";
+    color="#E2E8F0";
+    style="rounded";
+    api [label="REST API + OpenAPI\nPydantic v2 + request IDs", fillcolor="#F8FAFC"];
+    identity [label="Tenant boundary\nUsername → internal user UUID", fillcolor="#FFF5F5", color="#C8102E"];
+    document_service [label="Documents + ingestion\nValidation and lifecycle"];
+    chat_service [label="Chat sessions\nBounded short-term history"];
+    usage_service [label="Usage + pricing\nTokens, known cost, version"];
+    repositories [label="Owner-scoped repositories\nSQLAlchemy 2"];
+    api -> identity;
+    identity -> document_service;
+    identity -> chat_service;
+    identity -> usage_service;
+    document_service -> repositories;
+    chat_service -> repositories;
+    usage_service -> repositories;
+  }
+
+  subgraph cluster_model {
+    label="Model and orchestration layer";
+    color="#E2E8F0";
+    style="rounded";
+    ingestion_pipeline [label="Multi-format ingestion\nPage-image rendering\nSemantic or Docling chunking", fillcolor="#FFF5F5", color="#C8102E"];
+    rag_graph [label="LangGraph Agentic RAG\nPlan → retrieve → rerank → answer\nValidate → reflect → finalize", fillcolor="#FFF5F5", color="#C8102E"];
+    fallback [label="Conversational fallback\nActive-session history only"];
+    rag_graph -> fallback [style=dashed];
+  }
+
+  subgraph cluster_data {
+    label="Persistence";
+    color="#E2E8F0";
+    style="rounded";
+    postgres [label="PostgreSQL 16\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
+    uploads [label="Persistent volume\nSources + render artifacts", shape=folder, fillcolor="#F8FAFC"];
+    qdrant [label="External Qdrant\nsemantic_chunks\ndocling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
+  }
+
+  subgraph cluster_provider {
+    label="External model provider";
+    color="#E2E8F0";
+    style="rounded";
+    openai [label="OpenAI APIs\nResponses + embeddings", fillcolor="#F8FAFC"];
+  }
+
+  user -> react [label="HTTPS"];
+  user -> streamlit [label="optional"];
+  nginx -> api [label="REST + X-Username"];
+  streamlit -> api [label="REST + X-Username"];
+  document_service -> ingestion_pipeline [label="ingestion job"];
+  chat_service -> rag_graph [label="question + session history"];
+  repositories -> postgres [label="transactions"];
+  document_service -> uploads [label="source files"];
+  ingestion_pipeline -> qdrant [label="owner-scoped chunks"];
+  ingestion_pipeline -> openai;
+  rag_graph -> qdrant [label="mandatory owner filter"];
+  rag_graph -> openai;
+  usage_service -> openai [style=dashed];
+}

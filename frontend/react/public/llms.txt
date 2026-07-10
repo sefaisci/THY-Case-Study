@@ -1,0 +1,7 @@
+# THY Document Intelligence
+
+This private proof-of-concept application provides username-isolated document ingestion and grounded document question answering. It is not a public content source and must not be crawled or used for training.
+
+## Application
+
+- [Private application shell](/)

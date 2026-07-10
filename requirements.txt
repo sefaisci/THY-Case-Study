@@ -1,0 +1,42 @@
+# Runtime dependencies for the FastAPI, LangGraph, ingestion, and optional UI services.
+
+python-dotenv>=1.0,<2.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+typing-extensions>=4.12
+
+openai>=1.90
+langchain>=0.3
+langchain-core>=0.3
+langchain-community>=0.3
+langchain-openai>=0.3
+langchain-text-splitters>=0.3
+tiktoken>=0.13,<1.0
+langgraph>=0.4
+langsmith>=0.3
+
+qdrant-client>=1.14
+fastembed>=0.7
+
+# Docling pulls OCR/model dependencies, including torch, and can make the environment large.
+docling>=2.31
+pymupdf>=1.24
+python-docx>=1.1
+python-pptx>=1.0
+pillow>=10.4
+
+numpy>=1.26
+pandas>=2.2
+tqdm>=4.66
+rich>=13.7
+
+# FastAPI application, PostgreSQL persistence, migrations, and multipart uploads.
+# Keep FastAPI on the mature 0.115 line; newer Starlette 1.x releases require
+# a different TestClient transport package and are not needed for this POC.
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.34,<1.0
+sqlalchemy>=2.0,<3.0
+alembic>=1.14,<2.0
+psycopg[binary]>=3.2,<4.0
+python-multipart>=0.0.20,<1.0
+httpx>=0.28,<1.0

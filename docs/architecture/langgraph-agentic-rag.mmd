@@ -1,0 +1,37 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	query_understanding(query_understanding)
+	conversation_generation(conversation_generation)
+	final_response(final_response)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> query_understanding;
+	answer_subgraph\3aclaim_evidence_reflection -.-> conversation_generation;
+	answer_subgraph\3aclaim_evidence_reflection -.-> final_response;
+	conversation_generation --> final_response;
+	query_understanding -.-> conversation_generation;
+	query_understanding -.-> retrieval_subgraph\3aretrieval_planner;
+	retrieval_subgraph\3areranking -.-> answer_subgraph\3aanswer_generation;
+	retrieval_subgraph\3areranking -.-> conversation_generation;
+	final_response --> __end__;
+	subgraph retrieval_subgraph
+	retrieval_subgraph\3aretrieval_planner(retrieval_planner)
+	retrieval_subgraph\3ahybrid_retrieval(hybrid_retrieval)
+	retrieval_subgraph\3areranking(reranking)
+	retrieval_subgraph\3ahybrid_retrieval --> retrieval_subgraph\3areranking;
+	retrieval_subgraph\3aretrieval_planner --> retrieval_subgraph\3ahybrid_retrieval;
+	end
+	subgraph answer_subgraph
+	answer_subgraph\3aanswer_generation(answer_generation)
+	answer_subgraph\3acitation_validation(citation_validation)
+	answer_subgraph\3aclaim_evidence_reflection(claim_evidence_reflection)
+	answer_subgraph\3aanswer_generation --> answer_subgraph\3acitation_validation;
+	answer_subgraph\3acitation_validation --> answer_subgraph\3aclaim_evidence_reflection;
+	end
+	classDef default fill:#FFF5F5,stroke:#C8102E,stroke-width:1.5px,color:#14213D,line-height:1.25
+	classDef first fill:#C8102E,stroke:#C8102E,color:#FFFFFF
+	classDef last fill:#14213D,stroke:#14213D,color:#FFFFFF

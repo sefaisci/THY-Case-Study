@@ -1,0 +1,12 @@
+.env
+.env.*
+node_modules/
+dist/
+coverage/
+src/test/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+vitest.config.ts
+npm-debug.log*

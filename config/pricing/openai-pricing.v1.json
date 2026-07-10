@@ -1,0 +1,34 @@
+{
+  "version": "openai-standard-2026-07-10-v1",
+  "currency": "USD",
+  "unit": "per_1m_tokens",
+  "updated_at": "2026-07-10",
+  "sources": [
+    "https://developers.openai.com/api/docs/models/gpt-5.5",
+    "https://developers.openai.com/api/docs/guides/latest-model",
+    "https://developers.openai.com/api/docs/models/text-embedding-3-small"
+  ],
+  "models": {
+    "gpt-5.5": {
+      "input": 5.0,
+      "cached_input": 0.5,
+      "output": 30.0,
+      "notes": "Standard processing. Reasoning tokens are included in output tokens."
+    },
+    "text-embedding-3-small": {
+      "input": 0.02,
+      "cached_input": null,
+      "output": 0.0,
+      "notes": "Embeddings input token price."
+    }
+  },
+  "model_aliases": {
+    "gpt-5.5-2026-04-23": "gpt-5.5"
+  },
+  "unpriced_models": [
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna"
+  ]
+}

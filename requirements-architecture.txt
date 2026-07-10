@@ -1,0 +1,3 @@
+# Optional documentation tooling. The application runtime does not require this file.
+# Install the Graphviz system package before installing PyGraphviz.
+pygraphviz>=1.14,<2.0
