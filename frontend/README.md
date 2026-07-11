@@ -34,6 +34,7 @@ the React origin.
 ## Verification
 
 ```bash
+npm test
 npm run lint
 npm run build
 ```
@@ -52,8 +53,8 @@ npm run build
 ## Interface architecture
 
 - `src/features/navigation`: username resolution and chat-session navigation.
-- `src/features/chat`: responsive chat workspace, grounded answer rendering, and the composer.
-- `src/features/citations`: compact source summaries with expandable excerpts.
+- `src/features/chat`: responsive chat workspace, sanitized Markdown, mixed-delimiter KaTeX rendering, answer actions, and the composer.
+- `src/features/citations`: inline hover/focus/tap provenance previews plus complete expandable evidence cards.
 - `src/features/usage`: lazy stage-level request, session, and workspace usage.
 - `src/features/documents`: pending uploads, independent model controls, ingestion jobs, document lifecycle, and deletion.
 - `src/features/workspace`: application orchestration and user-switch isolation.

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/react/public/thy-logo.png" alt="Turkish Airlines emblem" width="92" />
+  <img src="frontend/public/favicon-192x192.png" alt="Turkish Airlines emblem" width="112" />
 </p>
 
 <h1 align="center">Cabin Knowledge Assistant</h1>
@@ -24,7 +24,7 @@
 
 Cabin Knowledge Assistant turns private PDF, DOCX, and PPTX files into a user-isolated knowledge base. It combines a professional React application, an asynchronous typed FastAPI boundary, async SQLAlchemy persistence, an external Qdrant cluster, OpenAI Responses and Embeddings APIs, Docling, and an asynchronous modular LangGraph workflow.
 
-The system supports two ingestion strategies, bounded concurrent multi-document processing, five-way parallel query retrieval, deterministic cross-collection fusion, actual source citations, session-scoped conversational memory, provider token accounting, versioned USD pricing, and retryable document deletion. React is the primary interface; the earlier Streamlit application remains available through an optional Compose profile.
+The system supports two ingestion strategies, bounded concurrent multi-document processing, five-way parallel query retrieval, deterministic cross-collection fusion, interactive source citations, polished KaTeX mathematics, session-scoped conversational memory, provider token accounting, versioned USD pricing, and retryable document deletion. React is the only frontend and runs as a focused three-panel document chat workspace.
 
 > [!IMPORTANT]
 > This repository is a proof of concept. Username-based identity demonstrates tenant scoping but is not authentication. Add enterprise identity, authorization, rate limiting, malware scanning, and durable background workers before production use.
@@ -38,7 +38,7 @@ The system supports two ingestion strategies, bounded concurrent multi-document 
 | Private retrieval | Mandatory backend-resolved `user_id` and completed-document filters on every Qdrant query |
 | Agentic RAG | Exactly five faithful query variants, LangGraph `Send` map branches, parallel Qdrant retrieval, deterministic reduction, reranking, grounding, citation validation, and reflection |
 | Conversational continuity | Citation-free fallback using only the active PostgreSQL chat session when useful document evidence is unavailable |
-| Traceable answers | Actual filename, location, excerpt, score, ingestion method, collection, and chunk metadata |
+| Traceable answers | Inline citation previews on hover, focus, or tap plus expandable evidence cards with actual filename, location, excerpt, score, ingestion method, collection, and chunk metadata |
 | Usage observability | Input, cached input, output, reasoning tokens, known USD cost, model snapshot, and pricing registry version |
 | Safe deletion | Retryable PostgreSQL state, owner-filtered deletion from both Qdrant collections, then physical file removal |
 | Async application stack | AsyncOpenAI, AsyncQdrantClient, SQLAlchemy AsyncSession, async FastAPI services, and non-blocking React request orchestration |
@@ -125,9 +125,7 @@ These patterns keep provider I/O concurrent while preserving reproducible answer
 │   ├── model-capabilities.v1.json
 │   └── pricing/openai-pricing.v1.json
 ├── docs/architecture/           # Generated architecture images and editable sources
-├── frontend/
-│   ├── react/                   # Primary React 19 application and Nginx image
-│   └── streamlit/               # Optional compatibility interface
+├── frontend/                    # React 19, Vite, TypeScript, and Nginx application
 ├── model/
 │   ├── agentic_rag/             # LangGraph graph, nodes, adapters, runner, and contracts
 │   ├── document_processing/     # PDF and Office rendering plus Docling processing
@@ -237,14 +235,6 @@ docker compose up --build
 | FastAPI | `http://localhost:8000` |
 | OpenAPI | `http://localhost:8000/docs` |
 
-Start the optional Streamlit interface as well:
-
-```bash
-docker compose --profile streamlit up --build
-```
-
-Streamlit is then available at `http://localhost:8501`.
-
 Stop containers without deleting persistent data:
 
 ```bash
@@ -291,10 +281,10 @@ cp .env.example .env
 ```
 
 ```bash
-cd frontend/react
+cd frontend
 nvm use
 npm ci
-cd ../..
+cd ..
 ```
 
 ### Start PostgreSQL and migrate
@@ -318,7 +308,7 @@ python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 ### Terminal 2 — React
 
 ```bash
-cd frontend/react
+cd frontend
 nvm use
 npm run dev
 ```
@@ -340,7 +330,7 @@ POSTGRES_PASSWORD=local-dev-password
 
 | Group | Important variables |
 | --- | --- |
-| Application | `APP_ENV`, `LOG_LEVEL`, `API_PORT`, `FRONTEND_PORT`, `STREAMLIT_PORT`, `CORS_ALLOWED_ORIGINS` |
+| Application | `APP_ENV`, `LOG_LEVEL`, `API_PORT`, `FRONTEND_PORT`, `CORS_ALLOWED_ORIGINS` |
 | PostgreSQL | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `DATABASE_URL`, `DATABASE_INTERNAL_URL` |
 | File processing | `UPLOAD_DIR`, `PAGE_IMAGE_DIR`, `PROCESSING_DIR`, `MAX_UPLOAD_SIZE_MB`, `DOC_CONVERSION_DPI`, `SOFFICE_BINARY` |
 | External Qdrant | `QDRANT_URL`, `QDRANT_API_KEY`, collection names, named vectors, and dense vector size |
@@ -431,11 +421,11 @@ The following checks do not require connected OpenAI or Qdrant requests:
 ```bash
 python -m compileall -q backend model scripts
 docker compose config --quiet
-docker compose --profile streamlit config --quiet
 ```
 
 ```bash
-cd frontend/react
+cd frontend
+npm test
 npm run lint
 npm run build
 ```
@@ -449,7 +439,6 @@ Connected ingestion and chat operations can incur provider charges.
 - Chat execution is asynchronous internally and browser timeouts abort fetches, but HTTP responses are non-streaming; durable request idempotency and provider-side cancellation after a client disconnect are not yet guaranteed.
 - PostgreSQL reconstructs session context instead of using a distributed LangGraph checkpointer.
 - Concurrency limits are process-local; multiple backend replicas require shared queue and rate-limit coordination.
-- The optional Streamlit profile is a compatibility client; React is the primary asynchronous browser orchestration surface.
 - Existing Qdrant points are not automatically migrated when a chunk schema changes; reingest those documents.
 - Rendering artifacts require a production retention and cleanup policy.
 - DOCX pagination can vary when host fonts differ; the backend image installs repeatable DejaVu and Liberation fonts.

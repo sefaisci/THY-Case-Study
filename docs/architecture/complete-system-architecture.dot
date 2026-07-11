@@ -40,9 +40,8 @@ digraph thy_agentic_rag_system {
     label="Frontend";
     color="#E2E8F0";
     style="rounded";
-    react [label="React 19 + TypeScript\nTailwind + TanStack Query + Zustand\nAsync mutations + batch job polling", fillcolor="#FFF5F5", color="#C8102E"];
+    react [label="React 19 + TypeScript\nVite + TanStack Query + Zustand\nMath rendering + citation previews", fillcolor="#FFF5F5", color="#C8102E"];
     nginx [label="Nginx\nStatic delivery + async API proxy"];
-    streamlit [label="Optional Streamlit\nCompatibility interface", style="rounded,dashed,filled", fillcolor="#F8FAFC"];
     react -> nginx;
   }
 
@@ -92,9 +91,7 @@ digraph thy_agentic_rag_system {
   }
 
   user -> react [label="HTTPS"];
-  user -> streamlit [label="optional"];
   nginx -> api [label="async REST + X-Username"];
-  streamlit -> api [label="REST + X-Username"];
   document_service -> ingestion_pipeline [label="bounded concurrent jobs"];
   chat_service -> rag_graph [label="await question + session history"];
   repositories -> postgres [label="await transactions"];
