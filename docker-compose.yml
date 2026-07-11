@@ -34,7 +34,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       SOFFICE_BINARY: ${SOFFICE_BINARY:-/usr/bin/soffice}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173,http://localhost:8501,http://127.0.0.1:8501}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -58,7 +58,7 @@ services:
 
   frontend:
     build:
-      context: ./frontend/react
+      context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
@@ -73,26 +73,6 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
-    restart: unless-stopped
-
-  streamlit:
-    profiles: ["streamlit"]
-    build:
-      context: .
-      dockerfile: frontend/streamlit/Dockerfile
-    environment:
-      BACKEND_BASE_URL: http://backend:8000
-    ports:
-      - "${STREAMLIT_PORT:-8501}:8501"
-    depends_on:
-      backend:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
     restart: unless-stopped
 
 volumes:

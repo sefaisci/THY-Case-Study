@@ -52,7 +52,7 @@ SOFFICE_BINARY=/Applications/LibreOffice.app/Contents/MacOS/soffice
 ## React
 
 ```bash
-cd frontend/react
+cd frontend
 nvm use
 npm ci
 npm run dev

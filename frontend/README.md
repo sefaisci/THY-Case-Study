@@ -1,6 +1,6 @@
 # THY Document Intelligence React Frontend
 
-This directory contains the production-style React 19 interface for the THY Agentic RAG API. It uses Vite, TypeScript, Tailwind CSS, TanStack Query, Zustand, React Markdown, React Dropzone, and Lucide icons.
+This directory contains the project's only browser client: a production-style React 19 interface for the THY Agentic RAG API. It uses Vite, TypeScript, Tailwind CSS, TanStack Query, Zustand, React Markdown, KaTeX, React Dropzone, and Lucide icons.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ The same commands work on Linux and macOS.
 ## Local development
 
 ```bash
-cd frontend/react
+cd frontend
 nvm use
 npm ci
 npm run dev

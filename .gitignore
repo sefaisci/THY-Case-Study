@@ -47,8 +47,8 @@ tests/
 **/*.test.tsx
 **/*.spec.ts
 **/*.spec.tsx
-frontend/react/src/test/
-frontend/react/vitest.config.ts
+frontend/src/test/
+frontend/vitest.config.ts
 docs/design/
 docs/validation/
 docs/superpowers/
@@ -58,8 +58,6 @@ design-qa.md
 
 # Local database and frontend runtime artifacts
 *.db
-.streamlit/secrets.toml
-**/.streamlit/secrets.toml
 
 # JavaScript and frontend build artifacts
 node_modules/
