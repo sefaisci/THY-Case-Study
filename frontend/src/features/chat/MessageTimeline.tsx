@@ -88,7 +88,7 @@ export function MessageTimeline({
                   </div>
                 }
               >
-                <AssistantMarkdown>{message.content}</AssistantMarkdown>
+                <AssistantMarkdown citations={message.citations}>{message.content}</AssistantMarkdown>
               </Suspense>
               <SourcesDisclosure citations={message.citations} />
               <UsageDisclosure

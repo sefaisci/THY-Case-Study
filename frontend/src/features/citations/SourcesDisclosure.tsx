@@ -1,8 +1,9 @@
 import { ChevronDown, FileText, Layers3 } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import type { CitationResponse } from "../../api/contracts";
 import {
+  formatCitationAccessibleLabel,
   formatCitationLocation,
   formatRetrievalScore,
 } from "../../lib/format";
@@ -12,6 +13,7 @@ interface SourcesDisclosureProps {
 }
 
 export function SourcesDisclosure({ citations }: SourcesDisclosureProps) {
+  const disclosureId = useId();
   const [open, setOpen] = useState(false);
   const [expandedExcerpts, setExpandedExcerpts] = useState<Set<string>>(() => new Set());
   if (citations.length === 0) return null;
@@ -22,6 +24,7 @@ export function SourcesDisclosure({ citations }: SourcesDisclosureProps) {
         type="button"
         className="sources-disclosure__trigger"
         aria-expanded={open}
+        aria-controls={`${disclosureId}-list`}
         onClick={() => setOpen((current) => !current)}
       >
         <span className="source-stack" aria-hidden="true">
@@ -36,11 +39,16 @@ export function SourcesDisclosure({ citations }: SourcesDisclosureProps) {
         <ChevronDown size={17} aria-hidden="true" />
       </button>
       {open ? (
-        <div className="sources-list">
+        <div id={`${disclosureId}-list`} className="sources-list">
           {citations.map((citation, index) => {
             const excerptExpanded = expandedExcerpts.has(citation.chunk_id);
             return (
-            <article key={citation.chunk_id} className="source-card">
+            <article
+              key={citation.chunk_id}
+              id={`${disclosureId}-${citation.chunk_id.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+              className="source-card"
+              aria-label={formatCitationAccessibleLabel(index + 1, citation.filename)}
+            >
               <div className="source-card__index">{index + 1}</div>
               <div className="source-card__body">
                 <div className="source-card__heading">

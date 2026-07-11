@@ -44,6 +44,10 @@ export function formatCitationLocation(
   return "Location unavailable";
 }
 
+export function formatCitationAccessibleLabel(index: number, filename: string): string {
+  return `Source ${index}: ${filename}`;
+}
+
 export function formatTimestamp(value: string, locale = "en-US"): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Not available";

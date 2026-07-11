@@ -820,6 +820,110 @@ textarea {
   overscroll-behavior-inline: contain;
 }
 
+.inline-citation {
+  display: inline-grid;
+  min-width: 1.45rem;
+  height: 1.35rem;
+  place-items: center;
+  margin-inline: 0.12rem;
+  padding: 0 0.3rem;
+  color: var(--thy-red-dark);
+  background: var(--thy-red-soft);
+  border: 1px solid #efb9be;
+  border-radius: 999px;
+  font-size: 0.7em;
+  font-weight: 780;
+  line-height: 1;
+  vertical-align: 0.12em;
+}
+
+.inline-citation:hover,
+.inline-citation[aria-expanded="true"] {
+  color: var(--white);
+  background: var(--thy-red);
+  border-color: var(--thy-red);
+}
+
+.citation-preview {
+  position: fixed;
+  z-index: 100;
+  width: min(352px, calc(100vw - 24px));
+  max-height: min(320px, calc(100vh - 24px));
+  padding: 14px;
+  overflow: auto;
+  color: var(--navy-700);
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: 12px;
+  box-shadow: var(--shadow-floating);
+}
+
+.citation-preview--above {
+  transform: translate(-50%, calc(-100% - 10px));
+}
+
+.citation-preview--below {
+  transform: translate(-50%, 10px);
+}
+
+.citation-preview__header {
+  display: grid;
+  gap: 5px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--slate-150);
+}
+
+.citation-preview__header > span {
+  color: var(--thy-red-dark);
+  font-size: 0.63rem;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.citation-preview__header strong {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--navy-950);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.citation-preview__header svg {
+  flex: 0 0 auto;
+  color: var(--thy-red);
+}
+
+.citation-preview__metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.citation-preview__metadata span {
+  padding: 3px 6px;
+  color: var(--slate-600);
+  background: var(--slate-100);
+  border-radius: 999px;
+  font-size: 0.61rem;
+  font-weight: 650;
+}
+
+.citation-preview p {
+  display: -webkit-box;
+  margin: 10px 0 0;
+  overflow: hidden;
+  color: var(--navy-700);
+  font-size: 0.72rem;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
 .chat-loading {
   display: flex;
   min-height: 260px;
