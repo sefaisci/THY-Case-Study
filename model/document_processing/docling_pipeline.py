@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Any
 
 import tiktoken
 
+from model.ingestion.progress import ProgressCallback, report_progress
 from model.ingestion.schemas import DocumentIngestionResult, LocationFailure
 from model.ingestion.settings import IngestionSettings
 from model.vector_store import (
@@ -68,26 +70,29 @@ class DoclingFixedChunkingPipeline:
         store: QdrantChunkStore,
         sparse_encoder: StableHashSparseEncoder | None = None,
         converter: Any | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
-        if converter is None:
-            from docling.document_converter import DocumentConverter
-
-            converter = DocumentConverter()
         self.settings = settings
         self.embedder = embedder
         self.store = store
         self.sparse_encoder = sparse_encoder or store.sparse_encoder
         self.converter = converter
+        self.progress_callback = progress_callback
+        self._conversion_lock = asyncio.Lock()
         try:
             self.tokenizer = tiktoken.encoding_for_model(settings.embedding_model)
         except KeyError:
             self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
-    def process_document(self, source: DocumentSource, user_id: str) -> DocumentIngestionResult:
+    async def process_document(
+        self,
+        source: DocumentSource,
+        user_id: str,
+    ) -> DocumentIngestionResult:
         """Convert one original source, chunk each location, embed, and upsert."""
 
         try:
-            self.store.delete_user_document_points(
+            await self.store.delete_user_document_points(
                 collection_name=self.settings.docling_collection,
                 user_id=user_id,
                 document_id=source.document_id,
@@ -107,23 +112,12 @@ class DoclingFixedChunkingPipeline:
             )
 
         try:
-            conversion_result = self.converter.convert(source.path)
-            document = conversion_result.document
-            page_numbers = sorted(int(number) for number in document.pages)
-            if not page_numbers:
-                full_text = normalize_markdown(document.export_to_markdown())
-                if not full_text:
-                    raise ValueError("Docling returned no pages, slides, or document text.")
-                page_numbers = [1]
-                records = self._extract_records(
-                    document,
+            async with self._conversion_lock:
+                page_numbers, records = await asyncio.to_thread(
+                    self._convert_and_extract_records,
                     source,
                     user_id,
-                    page_numbers,
-                    page_text_overrides={1: full_text},
                 )
-            else:
-                records = self._extract_records(document, source, user_id, page_numbers)
         except Exception as exc:
             return DocumentIngestionResult(
                 document_id=source.document_id,
@@ -134,24 +128,31 @@ class DoclingFixedChunkingPipeline:
                 failures=[LocationFailure(message=str(exc)[:1000])],
             )
 
+        total_locations = len(page_numbers)
+        await report_progress(
+            self.progress_callback,
+            total_pages=total_locations,
+            processed_pages=0,
+        )
         if not records:
+            await report_progress(
+                self.progress_callback,
+                total_pages=total_locations,
+                processed_pages=total_locations,
+            )
             return DocumentIngestionResult(
                 document_id=source.document_id,
                 document_name=source.document_name,
                 document_type=source.document_type,
                 method="docling",
                 status="failed",
-                processed_locations=len(page_numbers),
+                total_locations=total_locations,
+                processed_locations=total_locations,
                 failures=[LocationFailure(message="Docling produced no non-empty text chunks.")],
             )
 
         try:
-            vectors = self.embedder.embed_documents([record.text for record in records])
-            point_count = self.store.upsert_chunks(
-                collection_name=self.settings.docling_collection,
-                chunks=records,
-                dense_vectors=vectors,
-            )
+            vectors = await self.embedder.embed_documents([record.text for record in records])
         except Exception as exc:
             return DocumentIngestionResult(
                 document_id=source.document_id,
@@ -159,21 +160,104 @@ class DoclingFixedChunkingPipeline:
                 document_type=source.document_type,
                 method="docling",
                 status="failed",
-                processed_locations=len(page_numbers),
+                total_locations=total_locations,
                 chunk_count=len(records),
-                failures=[LocationFailure(message=f"Vector storage failed: {str(exc)[:900]}")],
+                failures=[LocationFailure(message=f"Vector embedding failed: {str(exc)[:900]}")],
             )
 
+        records_by_page: dict[int, list[ChunkRecord]] = {number: [] for number in page_numbers}
+        vectors_by_page: dict[int, list[list[float]]] = {number: [] for number in page_numbers}
+        for record, vector in zip(records, vectors, strict=True):
+            page_number = record.slide_number or record.page_number
+            if page_number is None:
+                continue
+            records_by_page.setdefault(page_number, []).append(record)
+            vectors_by_page.setdefault(page_number, []).append(vector)
+
+        processed_locations = 0
+        point_count = 0
+        failures: list[LocationFailure] = []
+        for page_number in page_numbers:
+            page_records = records_by_page.get(page_number, [])
+            if page_records:
+                try:
+                    point_count += await self.store.upsert_chunks(
+                        collection_name=self.settings.docling_collection,
+                        chunks=page_records,
+                        dense_vectors=vectors_by_page[page_number],
+                    )
+                except Exception as exc:
+                    failures.append(
+                        LocationFailure(
+                            location_number=page_number,
+                            message=f"Vector storage failed: {str(exc)[:900]}",
+                        )
+                    )
+                    break
+            processed_locations += 1
+            await report_progress(
+                self.progress_callback,
+                total_pages=total_locations,
+                processed_pages=processed_locations,
+            )
+
+        if point_count != len(records):
+            failures.append(
+                LocationFailure(
+                    message=(
+                        "Docling vector persistence is incomplete: "
+                        f"expected {len(records)} point(s), stored {point_count}."
+                    )
+                )
+            )
         return DocumentIngestionResult(
             document_id=source.document_id,
             document_name=source.document_name,
             document_type=source.document_type,
             method="docling",
-            status="completed",
-            processed_locations=len(page_numbers),
+            status="failed" if failures else "completed",
+            total_locations=total_locations,
+            processed_locations=processed_locations,
             chunk_count=len(records),
             point_count=point_count,
+            failures=failures,
         )
+
+    def _convert_and_extract_records(
+        self,
+        source: DocumentSource,
+        user_id: str,
+    ) -> tuple[list[int], list[ChunkRecord]]:
+        """Run blocking Docling conversion, export, and tokenization in one worker."""
+
+        if self.converter is None:
+            self.converter = self._create_converter()
+        conversion_result = self.converter.convert(source.path)
+        document = conversion_result.document
+        page_numbers = sorted(int(number) for number in document.pages)
+        if not page_numbers:
+            full_text = normalize_markdown(document.export_to_markdown())
+            if not full_text:
+                raise ValueError("Docling returned no pages, slides, or document text.")
+            page_numbers = [1]
+            records = self._extract_records(
+                document,
+                source,
+                user_id,
+                page_numbers,
+                page_text_overrides={1: full_text},
+            )
+        else:
+            records = self._extract_records(document, source, user_id, page_numbers)
+        return page_numbers, records
+
+    @staticmethod
+    def _create_converter() -> Any:
+        """Import and construct Docling inside the conversion worker thread."""
+
+        from docling.document_converter import DocumentConverter
+
+        return DocumentConverter()
 
     def _extract_records(
         self,
@@ -207,7 +291,7 @@ class DoclingFixedChunkingPipeline:
                 )
                 records.append(
                     ChunkRecord(
-                        collection_name="docling_fixed_chunks",
+                        collection_name=self.settings.docling_collection,
                         collection_type="docling_fixed",
                         user_id=user_id,
                         document_id=source.document_id,

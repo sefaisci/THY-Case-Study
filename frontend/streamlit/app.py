@@ -130,8 +130,11 @@ def poll_ingestion_jobs() -> None:
     if not username or not st.session_state.active_jobs:
         return
     terminal = False
-    for job_id, filename in list(st.session_state.active_jobs.items()):
-        job = client.get_ingestion_job(username, job_id)
+    active_jobs = dict(st.session_state.active_jobs)
+    jobs = client.get_ingestion_jobs(username, list(active_jobs))
+    for job in jobs:
+        job_id = job["id"]
+        filename = active_jobs[job_id]
         if job["status"] == "completed":
             if job_id not in st.session_state.job_notifications:
                 st.success("Ingestion completed successfully.")

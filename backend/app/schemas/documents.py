@@ -45,12 +45,19 @@ class IngestionStartRequest(BaseModel):
     document_ids: list[str] = Field(min_length=1, max_length=50)
 
 
+class IngestionStatusRequest(BaseModel):
+    job_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class IngestionJobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     document_id: str
     status: Literal["pending", "processing", "completed", "failed"]
+    total_pages: int = Field(ge=0)
+    processed_pages: int = Field(ge=0)
+    progress_percent: int = Field(default=0, ge=0, le=100)
     chunk_count: int
     point_count: int
     started_at: datetime | None = None
@@ -68,6 +75,10 @@ class IngestionJobResponse(BaseModel):
 class IngestionBatchResponse(BaseModel):
     jobs: list[IngestionJobResponse]
     message: str
+
+
+class IngestionStatusResponse(BaseModel):
+    jobs: list[IngestionJobResponse]
 
 
 class DocumentDeleteResponse(BaseModel):

@@ -1,6 +1,7 @@
 """Selectable semantic and Docling ingestion entry points."""
 
 from .coordinator import IngestionCoordinator, create_connected_ingestion_coordinator
+from .progress import ProgressCallback
 from .schemas import (
     DocumentIngestionResult,
     IngestionRequest,
@@ -16,5 +17,6 @@ __all__ = [
     "IngestionRunResult",
     "IngestionSettings",
     "LocationFailure",
+    "ProgressCallback",
     "create_connected_ingestion_coordinator",
 ]

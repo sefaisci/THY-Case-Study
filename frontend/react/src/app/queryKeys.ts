@@ -23,6 +23,8 @@ export const queryKeys = {
   ingestion: {
     job: (username: string, jobId: string) =>
       [...ownerKey(username), "ingestion-job", jobId] as const,
+    jobs: (username: string, jobIds: string[]) =>
+      [...ownerKey(username), "ingestion-jobs", [...jobIds].sort()] as const,
   },
   chats: {
     sessions: (username: string) => [...ownerKey(username), "chat-sessions"] as const,

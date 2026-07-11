@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -18,7 +20,9 @@ from model.usage import UsageCallback, emit_usage, usage_from_response
 from .schemas import (
     ClaimEvaluation,
     CollectionName,
+    NodeError,
     ReflectionResult,
+    RetrievalAdapterResult,
     RetrievalPlan,
     RetrievalQueryRewrite,
     RetrievedChunk,
@@ -29,7 +33,7 @@ from .settings import RagSettings
 class LlmAdapter(Protocol):
     """Text generation boundary used by graph nodes."""
 
-    def complete(
+    async def complete(
         self,
         system_prompt: str,
         user_prompt: str,
@@ -42,35 +46,40 @@ class LlmAdapter(Protocol):
 class EmbeddingAdapter(Protocol):
     """Embedding boundary used by retrieval adapters."""
 
-    def embed_query(self, text: str) -> list[float]:
+    async def embed_query(
+        self,
+        text: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[float]:
         """Return a dense vector for a query string."""
 
 
 class QueryRewriterAdapter(Protocol):
     """Boundary for producing a standalone bilingual retrieval query."""
 
-    def rewrite(self, question: str) -> RetrievalQueryRewrite:
-        """Return a faithful standalone query and an English retrieval form."""
+    async def rewrite(self, question: str) -> RetrievalQueryRewrite:
+        """Return four faithful generated retrieval forms."""
 
 
 class HybridRetrievalAdapter(Protocol):
     """Retrieval boundary for dense plus sparse capable search."""
 
-    def retrieve(
+    async def retrieve(
         self,
         *,
         query: str,
         dense_vector: list[float],
         plan: RetrievalPlan,
         user_id: str,
-    ) -> list[RetrievedChunk]:
+    ) -> RetrievalAdapterResult:
         """Return user-scoped retrieval candidates."""
 
 
 class RerankerAdapter(Protocol):
     """Replaceable reranker boundary."""
 
-    def rerank(
+    async def rerank(
         self,
         *,
         question: str,
@@ -83,7 +92,7 @@ class RerankerAdapter(Protocol):
 class GroundingEvaluatorAdapter(Protocol):
     """Claim-evidence evaluation boundary used after citation validation."""
 
-    def evaluate(
+    async def evaluate(
         self,
         *,
         question: str,
@@ -103,6 +112,55 @@ class RagAdapters:
     reranker: RerankerAdapter
     grounding: GroundingEvaluatorAdapter
     query_rewriter: QueryRewriterAdapter | None = None
+    _owned_clients: tuple[Any, ...] = field(
+        default_factory=tuple,
+        repr=False,
+        compare=False,
+    )
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    async def aclose(self) -> None:
+        """Close only provider clients created by the adapter factory.
+
+        Caller-supplied clients are deliberately excluded because their lifecycle
+        belongs to the caller. Closing is idempotent and attempts every owned
+        client before reporting any cleanup failures.
+        """
+
+        if self._closed:
+            return
+        object.__setattr__(self, "_closed", True)
+        failures: list[Exception] = []
+        seen: set[int] = set()
+        for client in self._owned_clients:
+            identity = id(client)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            close = getattr(client, "close", None)
+            if close is None:
+                close = getattr(client, "aclose", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # pragma: no cover - provider cleanup failure
+                failures.append(exc)
+        if failures:
+            raise ExceptionGroup("Failed to close owned RAG provider clients.", failures)
+
+    async def __aenter__(self) -> RagAdapters:
+        """Support explicit async context-manager ownership."""
+
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        """Close factory-owned clients when leaving an async context."""
+
+        del exc_type, exc, traceback
+        await self.aclose()
 
 
 class FakeEmbeddingAdapter:
@@ -111,9 +169,15 @@ class FakeEmbeddingAdapter:
     def __init__(self, vector_size: int = 32) -> None:
         self.vector_size = vector_size
 
-    def embed_query(self, text: str) -> list[float]:
+    async def embed_query(
+        self,
+        text: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[float]:
         """Create a deterministic pseudo-vector without external calls."""
 
+        del metadata
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         values = []
         for index in range(self.vector_size):
@@ -125,7 +189,7 @@ class FakeEmbeddingAdapter:
 class FakeLlmAdapter:
     """Grounded fake LLM used when API keys or services are unavailable."""
 
-    def complete(
+    async def complete(
         self,
         system_prompt: str,
         user_prompt: str,
@@ -174,7 +238,7 @@ class FakeLlmAdapter:
 class FakeGroundingEvaluatorAdapter:
     """Deterministic claim evaluator for offline graph tests."""
 
-    def evaluate(
+    async def evaluate(
         self,
         *,
         question: str,
@@ -277,14 +341,14 @@ class FakeHybridRetrievalAdapter:
             ),
         ]
 
-    def retrieve(
+    async def retrieve(
         self,
         *,
         query: str,
         dense_vector: list[float],
         plan: RetrievalPlan,
         user_id: str,
-    ) -> list[RetrievedChunk]:
+    ) -> RetrievalAdapterResult:
         """Return only chunks that belong to the requested user."""
 
         del dense_vector
@@ -304,13 +368,13 @@ class FakeHybridRetrievalAdapter:
                 adjusted_score = min(1.0, chunk.retrieval_score + (overlap * 0.03))
             scored.append(chunk.model_copy(update={"retrieval_score": adjusted_score}))
         scored.sort(key=lambda item: item.retrieval_score, reverse=True)
-        return scored[: plan.top_k]
+        return RetrievalAdapterResult(chunks=scored[: plan.top_k])
 
 
 class NoOpRerankerAdapter:
     """Reranker that preserves retrieval order."""
 
-    def rerank(
+    async def rerank(
         self,
         *,
         question: str,
@@ -326,7 +390,7 @@ class NoOpRerankerAdapter:
 class HeuristicRerankerAdapter:
     """Lightweight token-overlap reranker for offline experiments."""
 
-    def rerank(
+    async def rerank(
         self,
         *,
         question: str,
@@ -344,7 +408,15 @@ class HeuristicRerankerAdapter:
             # only a small tie-breaker because it is not reliable cross-lingually.
             rerank_score = chunk.retrieval_score + (min(overlap, 3) * 0.005)
             reranked.append(chunk.model_copy(update={"rerank_score": min(1.0, rerank_score)}))
-        reranked.sort(key=lambda item: item.effective_score, reverse=True)
+        reranked.sort(
+            key=lambda item: (
+                -item.fusion_score,
+                -item.effective_score,
+                item.collection_name,
+                item.document_id,
+                item.chunk_id,
+            )
+        )
         return reranked[:limit]
 
 
@@ -359,40 +431,48 @@ class OpenAIEmbeddingAdapter:
         usage_callback: UsageCallback | None = None,
     ) -> None:
         if client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
             kwargs = {"api_key": settings.openai_api_key}
             if settings.openai_base_url:
                 kwargs["base_url"] = settings.openai_base_url
-            client = OpenAI(**kwargs)
+            client = AsyncOpenAI(**kwargs)
         self._client = client
         self._model = settings.embedding_model
         self._usage_callback = usage_callback
 
-    def embed_query(self, text: str) -> list[float]:
+    async def embed_query(
+        self,
+        text: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[float]:
         """Create an embedding vector through the OpenAI API."""
 
-        response = self._client.embeddings.create(model=self._model, input=text)
+        response = await self._client.embeddings.create(model=self._model, input=text)
         emit_usage(
             self._usage_callback,
             usage_from_response(
                 response,
                 stage="retrieval_embedding",
                 fallback_model=self._model,
+                metadata=metadata,
             ),
         )
         return list(response.data[0].embedding)
 
 
 class OpenAIQueryRewriterAdapter:
-    """Responses API adapter for standalone bilingual retrieval queries."""
+    """Responses API adapter for four distinct generated retrieval queries."""
 
     _SYSTEM_PROMPT = (
-        "Rewrite the supplied question for document retrieval; do not answer it. "
-        "The standalone_query must preserve the user's language and intent. The "
-        "english_query must be a faithful English translation with a few essential "
-        "search synonyms or abbreviations when useful. Preserve names, numbers, and "
-        "technical terms. Do not introduce topics absent from the question."
+        "Produce exactly four distinct retrieval forms for the supplied question; do "
+        "not answer it. standalone_query must resolve references while preserving the "
+        "user's language and intent. english_query must be a faithful English form. "
+        "keyword_query must preserve entities, filenames, symbols, numbers, and useful "
+        "technical terms for lexical retrieval. source_style_query must resemble a short "
+        "passage likely to occur in a relevant source, without asserting or introducing "
+        "facts absent from the question. All four values must be meaningfully distinct."
     )
 
     def __init__(
@@ -403,22 +483,22 @@ class OpenAIQueryRewriterAdapter:
         usage_callback: UsageCallback | None = None,
     ) -> None:
         if client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
             kwargs = {"api_key": settings.openai_api_key}
             if settings.openai_base_url:
                 kwargs["base_url"] = settings.openai_base_url
-            client = OpenAI(**kwargs)
+            client = AsyncOpenAI(**kwargs)
         self._client = client
         self._model = settings.self_service_llm_model
         self._reasoning_effort = settings.self_service_reasoning_effort
         self._timeout = settings.llm_request_timeout_seconds
         self._usage_callback = usage_callback
 
-    def rewrite(self, question: str) -> RetrievalQueryRewrite:
-        """Return a structured standalone and English query pair."""
+    async def rewrite(self, question: str) -> RetrievalQueryRewrite:
+        """Return four structured generated query variants."""
 
-        response = self._client.responses.parse(
+        response = await self._client.responses.parse(
             model=self._model,
             reasoning={"effort": self._reasoning_effort},
             instructions=self._SYSTEM_PROMPT,
@@ -456,18 +536,18 @@ class OpenAILlmAdapter:
         usage_callback: UsageCallback | None = None,
     ) -> None:
         if client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
             kwargs = {"api_key": settings.openai_api_key}
             if settings.openai_base_url:
                 kwargs["base_url"] = settings.openai_base_url
-            client = OpenAI(**kwargs)
+            client = AsyncOpenAI(**kwargs)
         self._client = client
         self._model = settings.self_service_llm_model
         self._timeout = settings.llm_request_timeout_seconds
         self._usage_callback = usage_callback
 
-    def complete(
+    async def complete(
         self,
         system_prompt: str,
         user_prompt: str,
@@ -484,7 +564,7 @@ class OpenAILlmAdapter:
         }
         if reasoning_effort in self._SUPPORTED_REASONING_EFFORTS:
             kwargs["reasoning"] = {"effort": reasoning_effort}
-        response = self._client.responses.create(**kwargs)
+        response = await self._client.responses.create(**kwargs)
         emit_usage(
             self._usage_callback,
             usage_from_response(
@@ -521,19 +601,19 @@ class OpenAIGroundingEvaluatorAdapter:
         usage_callback: UsageCallback | None = None,
     ) -> None:
         if client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
             kwargs = {"api_key": settings.openai_api_key}
             if settings.openai_base_url:
                 kwargs["base_url"] = settings.openai_base_url
-            client = OpenAI(**kwargs)
+            client = AsyncOpenAI(**kwargs)
         self._client = client
         self._model = settings.self_service_llm_model
         self._reasoning_effort = settings.self_service_reasoning_effort
         self._timeout = settings.llm_request_timeout_seconds
         self._usage_callback = usage_callback
 
-    def evaluate(
+    async def evaluate(
         self,
         *,
         question: str,
@@ -553,7 +633,7 @@ class OpenAIGroundingEvaluatorAdapter:
             }
             for chunk in cited_chunks
         ]
-        response = self._client.responses.parse(
+        response = await self._client.responses.parse(
             model=self._model,
             reasoning={"effort": self._reasoning_effort},
             instructions=self._SYSTEM_PROMPT,
@@ -594,9 +674,9 @@ class QdrantHybridRetrievalAdapter:
         sparse_encoder: StableHashSparseEncoder | None = None,
     ) -> None:
         if client is None:
-            from qdrant_client import QdrantClient
+            from qdrant_client import AsyncQdrantClient
 
-            client = QdrantClient(
+            client = AsyncQdrantClient(
                 url=settings.qdrant_url,
                 api_key=settings.qdrant_api_key,
             )
@@ -606,20 +686,20 @@ class QdrantHybridRetrievalAdapter:
         self._sparse_encoder = sparse_encoder or StableHashSparseEncoder()
         self._allowed_document_ids = settings.allowed_document_ids
 
-    def retrieve(
+    async def retrieve(
         self,
         *,
         query: str,
         dense_vector: list[float],
         plan: RetrievalPlan,
         user_id: str,
-    ) -> list[RetrievedChunk]:
-        """Run dense and sparse prefetch with RRF and owner filters."""
+    ) -> RetrievalAdapterResult:
+        """Run scoped collection queries concurrently with mandatory owner filters."""
 
         from qdrant_client import models
 
         if self._allowed_document_ids == ():
-            return []
+            return RetrievalAdapterResult()
         user_filter = (
             build_user_documents_filter(user_id, self._allowed_document_ids)
             if self._allowed_document_ids is not None
@@ -627,9 +707,11 @@ class QdrantHybridRetrievalAdapter:
         )
         sparse_vector = self._sparse_encoder.encode(query)
         chunks: list[RetrievedChunk] = []
+        errors: list[NodeError] = []
         collection_order = {name: index for index, name in enumerate(plan.collections)}
-        for collection in plan.collections:
-            response = self._client.query_points(
+
+        async def query_collection(collection: CollectionName):
+            response = await self._client.query_points(
                 collection_name=collection,
                 prefetch=[
                     models.Prefetch(
@@ -657,9 +739,25 @@ class QdrantHybridRetrievalAdapter:
                 with_payload=True,
                 with_vectors=False,
             )
+            return collection, response.points
+
+        outcomes = await asyncio.gather(
+            *(query_collection(collection) for collection in plan.collections),
+            return_exceptions=True,
+        )
+        for collection, outcome in zip(plan.collections, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                errors.append(
+                    NodeError(
+                        node=f"hybrid_retrieval:{collection}",
+                        message=str(outcome),
+                    )
+                )
+                continue
+            returned_collection, points = outcome
             chunks.extend(
                 chunk
-                for chunk in _qdrant_hits_to_chunks(collection, response.points)
+                for chunk in _qdrant_hits_to_chunks(returned_collection, points)
                 if chunk.user_id == user_id
                 and (
                     self._allowed_document_ids is None
@@ -681,7 +779,10 @@ class QdrantHybridRetrievalAdapter:
                 item.chunk_id,
             )
         )
-        return merged[: plan.top_k]
+        return RetrievalAdapterResult(
+            chunks=merged[: plan.top_k],
+            errors=sorted(errors, key=lambda item: (item.node, item.message)),
+        )
 
 
 def create_fake_adapters(settings: RagSettings | None = None) -> RagAdapters:
@@ -715,6 +816,23 @@ def create_openai_qdrant_adapters(
     settings = settings or RagSettings.from_env()
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY must be set before using real OpenAI adapters.")
+    owned_clients: list[Any] = []
+    if openai_client is None:
+        from openai import AsyncOpenAI
+
+        openai_kwargs = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            openai_kwargs["base_url"] = settings.openai_base_url
+        openai_client = AsyncOpenAI(**openai_kwargs)
+        owned_clients.append(openai_client)
+    if qdrant_client is None:
+        from qdrant_client import AsyncQdrantClient
+
+        qdrant_client = AsyncQdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+        )
+        owned_clients.append(qdrant_client)
     reranker: RerankerAdapter
     if settings.enable_reranker and settings.reranker_provider == "heuristic":
         reranker = HeuristicRerankerAdapter()
@@ -743,6 +861,7 @@ def create_openai_qdrant_adapters(
             client=openai_client,
             usage_callback=usage_callback,
         ),
+        _owned_clients=tuple(owned_clients),
     )
 
 

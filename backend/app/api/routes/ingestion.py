@@ -7,6 +7,8 @@ from ...schemas.documents import (
     IngestionBatchResponse,
     IngestionJobResponse,
     IngestionStartRequest,
+    IngestionStatusRequest,
+    IngestionStatusResponse,
 )
 from ...services import IngestionService
 from ..dependencies import ApplicationSettings, CurrentUser, DatabaseSession
@@ -24,7 +26,20 @@ def _job_response(job) -> IngestionJobResponse:
         message = "Ingestion is processing."
     else:
         message = "Ingestion is pending."
-    return IngestionJobResponse.model_validate(job).model_copy(update={"message": message})
+    total_pages = max(0, job.total_pages)
+    processed_pages = min(max(0, job.processed_pages), total_pages)
+    progress_percent = (
+        min(100, round(processed_pages * 100 / total_pages))
+        if total_pages
+        else 0
+    )
+    return IngestionJobResponse.model_validate(job).model_copy(
+        update={
+            "processed_pages": processed_pages,
+            "progress_percent": progress_percent,
+            "message": message,
+        }
+    )
 
 
 @router.post(
@@ -45,13 +60,30 @@ async def start_ingestion(
         settings,
         session_factory=SessionLocal,
     )
-    jobs = service.start(user_id=user.id, document_ids=request.document_ids)
-    for job in jobs:
-        background_tasks.add_task(service.process_job, job.id)
+    jobs = await service.start(user_id=user.id, document_ids=request.document_ids)
+    background_tasks.add_task(service.process_jobs, [job.id for job in jobs])
     return IngestionBatchResponse(
         jobs=[_job_response(job) for job in jobs],
         message="Ingestion started.",
     )
+
+
+@router.post(
+    "/status",
+    response_model=IngestionStatusResponse,
+    summary="Poll multiple owner-scoped ingestion jobs",
+)
+async def get_ingestion_jobs(
+    request: IngestionStatusRequest,
+    user: CurrentUser,
+    session: DatabaseSession,
+    settings: ApplicationSettings,
+) -> IngestionStatusResponse:
+    jobs = await IngestionService(session, settings).get_jobs(
+        user_id=user.id,
+        job_ids=request.job_ids,
+    )
+    return IngestionStatusResponse(jobs=[_job_response(job) for job in jobs])
 
 
 @router.get(
@@ -65,5 +97,5 @@ async def get_ingestion_job(
     session: DatabaseSession,
     settings: ApplicationSettings,
 ) -> IngestionJobResponse:
-    job = IngestionService(session, settings).get_job(user_id=user.id, job_id=job_id)
+    job = await IngestionService(session, settings).get_job(user_id=user.id, job_id=job_id)
     return _job_response(job)

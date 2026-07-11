@@ -37,7 +37,7 @@ async def create_chat_session(
     settings: ApplicationSettings,
     catalog: ModelCatalog,
 ) -> ChatSessionResponse:
-    chat = _service(session, settings, catalog).create_session(user.id, request.title)
+    chat = await _service(session, settings, catalog).create_session(user.id, request.title)
     return ChatSessionResponse.model_validate(chat)
 
 
@@ -48,7 +48,7 @@ async def list_chat_sessions(
     settings: ApplicationSettings,
     catalog: ModelCatalog,
 ) -> list[ChatSessionResponse]:
-    return _service(session, settings, catalog).list_sessions(user.id)
+    return await _service(session, settings, catalog).list_sessions(user.id)
 
 
 @router.get(
@@ -63,7 +63,7 @@ async def list_chat_messages(
     settings: ApplicationSettings,
     catalog: ModelCatalog,
 ) -> list[ChatMessageResponse]:
-    return _service(session, settings, catalog).list_messages(user.id, session_id)
+    return await _service(session, settings, catalog).list_messages(user.id, session_id)
 
 
 @router.post(
@@ -79,7 +79,7 @@ async def send_chat_message(
     settings: ApplicationSettings,
     catalog: ModelCatalog,
 ) -> ChatTurnResponse:
-    return _service(session, settings, catalog).send_message(
+    return await _service(session, settings, catalog).send_message(
         user_id=user.id,
         session_id=session_id,
         request=request,

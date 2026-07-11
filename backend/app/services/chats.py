@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import uuid
+import weakref
 from collections.abc import Callable
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from model.agentic_rag import (
     ConversationTurn,
@@ -33,11 +36,62 @@ from .usage import UsageService
 
 logger = logging.getLogger(__name__)
 
+_USAGE_STAGE_ORDER = {
+    "retrieval_query_rewrite": 0,
+    "retrieval_embedding": 1,
+    "answer_generation": 2,
+    "retrieval_grounding": 3,
+}
+
+
+# Every HTTP request receives its own ``ChatService`` and ``AsyncSession``, so
+# turn serialization must live outside a service instance.  Locks are scoped to
+# their event loop (``asyncio`` primitives must never be shared across loops)
+# and weakly held so completed sessions do not create an unbounded registry.
+_turn_lock_registry_guard = threading.Lock()
+_turn_locks_by_loop: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    weakref.WeakValueDictionary[str, asyncio.Lock],
+] = weakref.WeakKeyDictionary()
+
+
+def _session_turn_lock(user_id: str, session_id: str) -> asyncio.Lock:
+    """Return the process-wide lock for one owned chat session on this loop."""
+
+    loop = asyncio.get_running_loop()
+    key = f"{user_id}:{session_id}"
+    with _turn_lock_registry_guard:
+        loop_locks = _turn_locks_by_loop.get(loop)
+        if loop_locks is None:
+            loop_locks = weakref.WeakValueDictionary()
+            _turn_locks_by_loop[loop] = loop_locks
+        lock = loop_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            loop_locks[key] = lock
+        return lock
+
+
+def _ordered_usage_events(events: list[ModelUsage]) -> list[ModelUsage]:
+    """Stabilize parallel provider telemetry without changing token totals."""
+
+    return sorted(
+        events,
+        key=lambda event: (
+            _USAGE_STAGE_ORDER.get(event.stage, len(_USAGE_STAGE_ORDER)),
+            event.stage,
+            str(event.metadata.get("query_variant_id", "")),
+            str(event.metadata.get("page_number", "")),
+            event.model,
+            event.request_id or "",
+        ),
+    )
+
 
 class ChatService:
     def __init__(
         self,
-        session: Session,
+        session: AsyncSession,
         settings: Settings,
         model_catalog: ModelCatalogService,
         *,
@@ -52,35 +106,55 @@ class ChatService:
         self.adapter_factory = adapter_factory
         self.runner = runner
 
-    def create_session(self, user_id: str, title: str | None = None) -> ChatSession:
-        chat = self.repository.create_session(
+    async def create_session(self, user_id: str, title: str | None = None) -> ChatSession:
+        chat = await self.repository.create_session(
             user_id=user_id,
             title=(title or "New chat").strip() or "New chat",
             identifier=f"chat-{uuid.uuid4()}",
         )
-        self.session.commit()
+        await self.session.commit()
         return chat
 
-    def list_sessions(self, user_id: str) -> list[ChatSessionResponse]:
-        return [ChatSessionResponse.model_validate(item) for item in self.repository.list_sessions(user_id)]
-
-    def list_messages(self, user_id: str, session_id: str) -> list[ChatMessageResponse]:
-        chat = self._owned_session(user_id, session_id)
+    async def list_sessions(self, user_id: str) -> list[ChatSessionResponse]:
         return [
-            ChatMessageResponse.model_validate(item)
-            for item in self.repository.list_messages(chat.id)
+            ChatSessionResponse.model_validate(item)
+            for item in await self.repository.list_sessions(user_id)
         ]
 
-    def send_message(
+    async def list_messages(self, user_id: str, session_id: str) -> list[ChatMessageResponse]:
+        chat = await self._owned_session(user_id, session_id)
+        return [
+            ChatMessageResponse.model_validate(item)
+            for item in await self.repository.list_messages(chat.id)
+        ]
+
+    async def send_message(
         self,
         *,
         user_id: str,
         session_id: str,
         request: ChatMessageRequest,
     ) -> ChatTurnResponse:
-        chat = self._owned_session(user_id, session_id)
-        self.model_catalog.validate(request.chat_model, request.chat_reasoning_effort)
-        previous = self.repository.list_messages(
+        # Preserve turn order for one conversation from history read through
+        # commit. Different sessions receive different locks and can continue
+        # through model and retrieval work concurrently.
+        async with _session_turn_lock(user_id, session_id):
+            return await self._send_message_serialized(
+                user_id=user_id,
+                session_id=session_id,
+                request=request,
+            )
+
+    async def _send_message_serialized(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        request: ChatMessageRequest,
+    ) -> ChatTurnResponse:
+        await self.model_catalog.validate(request.chat_model, request.chat_reasoning_effort)
+        chat = await self._owned_session(user_id, session_id)
+        previous = await self.repository.list_messages(
             chat.id,
             limit=self.settings.max_session_history_messages,
         )
@@ -89,26 +163,29 @@ class ChatService:
             for item in previous
             if item.role in {"user", "assistant"}
         ]
-        user_message = self.repository.add_message(
-            session_id=chat.id,
-            role="user",
-            content=request.question.strip(),
+        chat_id = chat.id
+        chat_identifier = chat.session_identifier
+        initial_title = chat.title
+        rag_settings = await self._rag_settings(
+            request.chat_model,
+            request.chat_reasoning_effort,
+            user_id=user_id,
         )
+        # Release the read transaction before potentially long provider calls.
+        # A read-only commit works with ``expire_on_commit=False`` and avoids
+        # rollback-expiring owner/session objects held by the request.
+        await self.session.commit()
         events: list[ModelUsage] = []
+        adapters = None
         try:
-            rag_settings = self._rag_settings(
-                request.chat_model,
-                request.chat_reasoning_effort,
-                user_id=user_id,
-            )
             adapters = self.adapter_factory(
                 rag_settings,
                 usage_callback=events.append,
             )
-            response = self.runner(
+            response = await self.runner(
                 request.question.strip(),
                 user_id=user_id,
-                thread_id=chat.session_identifier,
+                thread_id=chat_identifier,
                 adapters=adapters,
                 settings=rag_settings,
                 collection_scope=request.collection_scope,
@@ -128,7 +205,7 @@ class ChatService:
                     extra={
                         "event": "rag_stage_recovered",
                         "user_id": user_id,
-                        "chat_session_id": chat.id,
+                        "chat_session_id": chat_id,
                         "failed_nodes": [item.node for item in response.errors],
                     },
                 )
@@ -151,7 +228,13 @@ class ChatService:
                 (event.model for event in events if event.stage == "answer_generation"),
                 request.chat_model,
             )
-            assistant_message = self.repository.add_message(
+            chat = await self._owned_session(user_id, session_id)
+            user_message = await self.repository.add_message(
+                session_id=chat.id,
+                role="user",
+                content=request.question.strip(),
+            )
+            assistant_message = await self.repository.add_message(
                 session_id=chat.id,
                 role="assistant",
                 content=response.answer,
@@ -159,15 +242,15 @@ class ChatService:
                 model=actual_model,
                 reasoning_effort=request.chat_reasoning_effort,
             )
-            if chat.title == "New chat":
+            if initial_title == "New chat" and chat.title == "New chat":
                 chat.title = request.question.strip()[:80]
             chat.last_activity_at = utc_now()
             usage_service = UsageService(
                 self.session,
                 PricingRegistry(self.settings.pricing_registry_path),
             )
-            request_records = usage_service.persist_events(
-                events,
+            request_records = await usage_service.persist_events(
+                _ordered_usage_events(events),
                 user_id=user_id,
                 operation="chat",
                 reasoning_effort=request.chat_reasoning_effort,
@@ -183,7 +266,7 @@ class ChatService:
             ):
                 if stage not in recorded_stages:
                     request_records.append(
-                        usage_service.record_not_applicable(
+                        await usage_service.record_not_applicable(
                             user_id=user_id,
                             operation="chat",
                             stage=stage,
@@ -192,12 +275,12 @@ class ChatService:
                         )
                     )
             usage_repository = UsageRepository(self.session)
-            session_records = usage_repository.list_for_user(user_id, session_id=chat.id)
-            total_records = usage_repository.list_for_user(user_id, limit=10_000)
+            session_records = await usage_repository.list_for_user(user_id, session_id=chat.id)
+            total_records = await usage_repository.list_for_user(user_id, limit=10_000)
             request_totals = usage_service.totals(request_records)
             session_totals = usage_service.totals(session_records)
             total_totals = usage_service.totals(total_records)
-            self.session.commit()
+            await self.session.commit()
             return ChatTurnResponse(
                 user_message=ChatMessageResponse.model_validate(user_message),
                 assistant_message=ChatMessageResponse.model_validate(assistant_message),
@@ -208,16 +291,32 @@ class ChatService:
                 total_usage=total_totals,
             )
         except Exception:
-            self.session.rollback()
+            if self.session.in_transaction():
+                await self.session.rollback()
             raise
+        finally:
+            close = getattr(adapters, "aclose", None) if adapters is not None else None
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    logger.warning(
+                        "Async RAG provider clients could not be closed cleanly.",
+                        extra={
+                            "event": "rag_clients_close_failed",
+                            "user_id": user_id,
+                            "chat_session_id": session_id,
+                        },
+                        exc_info=True,
+                    )
 
-    def _owned_session(self, user_id: str, session_id: str) -> ChatSession:
-        chat = self.repository.get_owned(user_id, session_id)
+    async def _owned_session(self, user_id: str, session_id: str) -> ChatSession:
+        chat = await self.repository.get_owned(user_id, session_id)
         if chat is None:
             raise NotFoundError("Chat session not found.", code="chat_session_not_found")
         return chat
 
-    def _rag_settings(self, model: str, effort: str, *, user_id: str) -> RagSettings:
+    async def _rag_settings(self, model: str, effort: str, *, user_id: str) -> RagSettings:
         return RagSettings(
             app_env=self.settings.app_env,
             runtime_mode="hybrid",
@@ -245,6 +344,6 @@ class ChatService:
             enable_reranker=self.settings.enable_reranker,
             reranker_provider=self.settings.reranker_provider,
             allowed_document_ids=tuple(
-                self.document_repository.list_retrievable_ids(user_id)
+                await self.document_repository.list_retrievable_ids(user_id)
             ),
         )

@@ -17,4 +17,4 @@ async def list_models(
     catalog: ModelCatalog,
     refresh: bool = Query(default=False, description="Bypass the short model-list cache."),
 ) -> ModelCatalogResponse:
-    return catalog.get_catalog(force=refresh)
+    return await catalog.get_catalog(force=refresh)

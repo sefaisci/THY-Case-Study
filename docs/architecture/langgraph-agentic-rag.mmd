@@ -20,10 +20,12 @@ graph TD;
 	final_response --> __end__;
 	subgraph retrieval_subgraph
 	retrieval_subgraph\3aretrieval_planner(retrieval_planner)
-	retrieval_subgraph\3ahybrid_retrieval(hybrid_retrieval)
+	retrieval_subgraph\3aretrieve_variant(retrieve_variant)
+	retrieval_subgraph\3afuse_variant_results(fuse_variant_results)
 	retrieval_subgraph\3areranking(reranking)
-	retrieval_subgraph\3ahybrid_retrieval --> retrieval_subgraph\3areranking;
-	retrieval_subgraph\3aretrieval_planner --> retrieval_subgraph\3ahybrid_retrieval;
+	retrieval_subgraph\3afuse_variant_results --> retrieval_subgraph\3areranking;
+	retrieval_subgraph\3aretrieval_planner -.-> retrieval_subgraph\3aretrieve_variant;
+	retrieval_subgraph\3aretrieve_variant --> retrieval_subgraph\3afuse_variant_results;
 	end
 	subgraph answer_subgraph
 	answer_subgraph\3aanswer_generation(answer_generation)

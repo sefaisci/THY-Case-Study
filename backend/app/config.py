@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     fixed_chunk_size_tokens: int = 800
     fixed_chunk_overlap_tokens: int = 120
     embedding_batch_size: int = 32
+    ingestion_job_concurrency: int = Field(default=4, gt=0, le=16)
+    semantic_page_max_concurrency: int = Field(default=3, gt=0, le=32)
+    document_max_concurrency: int = Field(default=2, gt=0, le=16)
     llm_request_timeout_seconds: int = 120
     retrieval_top_k: int = 12
     rerank_top_k: int = 6

@@ -6,7 +6,7 @@ digraph thy_agentic_rag_system {
     bgcolor="white",
     fontname="Helvetica",
     fontsize=22,
-    label="THY-Branded Agentic RAG — Complete System Architecture",
+    label="THY-Branded Agentic RAG — Fully Asynchronous System Architecture",
     labelloc="t",
     labeljust="l",
     pad=0.35,
@@ -40,22 +40,22 @@ digraph thy_agentic_rag_system {
     label="Frontend";
     color="#E2E8F0";
     style="rounded";
-    react [label="React 19 + TypeScript\nTailwind + TanStack Query + Zustand", fillcolor="#FFF5F5", color="#C8102E"];
-    nginx [label="Nginx\nStatic delivery + API proxy"];
+    react [label="React 19 + TypeScript\nTailwind + TanStack Query + Zustand\nAsync mutations + batch job polling", fillcolor="#FFF5F5", color="#C8102E"];
+    nginx [label="Nginx\nStatic delivery + async API proxy"];
     streamlit [label="Optional Streamlit\nCompatibility interface", style="rounded,dashed,filled", fillcolor="#F8FAFC"];
     react -> nginx;
   }
 
   subgraph cluster_backend {
-    label="FastAPI application";
+    label="Async FastAPI application";
     color="#E2E8F0";
     style="rounded";
-    api [label="REST API + OpenAPI\nPydantic v2 + request IDs", fillcolor="#F8FAFC"];
+    api [label="Async REST API + OpenAPI\nPydantic v2 + request IDs", fillcolor="#F8FAFC"];
     identity [label="Tenant boundary\nUsername → internal user UUID", fillcolor="#FFF5F5", color="#C8102E"];
-    document_service [label="Documents + ingestion\nValidation and lifecycle"];
-    chat_service [label="Chat sessions\nBounded short-term history"];
+    document_service [label="Documents + ingestion\nConcurrent jobs + one-active-job invariant\nCancellation-safe lifecycle"];
+    chat_service [label="Chat sessions\nPer-session ordered async turns\nBounded short-term history"];
     usage_service [label="Usage + pricing\nTokens, known cost, version"];
-    repositories [label="Owner-scoped repositories\nSQLAlchemy 2"];
+    repositories [label="Owner-scoped repositories\nAsync SQLAlchemy 2 + AsyncSession"];
     api -> identity;
     identity -> document_service;
     identity -> chat_service;
@@ -69,8 +69,8 @@ digraph thy_agentic_rag_system {
     label="Model and orchestration layer";
     color="#E2E8F0";
     style="rounded";
-    ingestion_pipeline [label="Multi-format ingestion\nPage-image rendering\nSemantic or Docling chunking", fillcolor="#FFF5F5", color="#C8102E"];
-    rag_graph [label="LangGraph Agentic RAG\nPlan → retrieve → rerank → answer\nValidate → reflect → finalize", fillcolor="#FFF5F5", color="#C8102E"];
+    ingestion_pipeline [label="Bounded async ingestion\nConcurrent documents + semantic pages\nSemantic or Docling chunking\nBatched embeddings + Qdrant upserts", fillcolor="#FFF5F5", color="#C8102E"];
+    rag_graph [label="Async LangGraph Agentic RAG\nGenerate exactly 5 query variants\nSend map → parallel retrieval → reducer\nRerank → answer → validate → reflect", fillcolor="#FFF5F5", color="#C8102E"];
     fallback [label="Conversational fallback\nActive-session history only"];
     rag_graph -> fallback [style=dashed];
   }
@@ -79,29 +79,29 @@ digraph thy_agentic_rag_system {
     label="Persistence";
     color="#E2E8F0";
     style="rounded";
-    postgres [label="PostgreSQL 16\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
+    postgres [label="PostgreSQL 16\nAsync driver, row locks, partial unique index\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
     uploads [label="Persistent volume\nSources + render artifacts", shape=folder, fillcolor="#F8FAFC"];
-    qdrant [label="External Qdrant\nsemantic_chunks\ndocling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
+    qdrant [label="External Qdrant\nAsyncQdrantClient\n5 parallel owner-scoped searches\nsemantic_chunks + docling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
   }
 
   subgraph cluster_provider {
     label="External model provider";
     color="#E2E8F0";
     style="rounded";
-    openai [label="OpenAI APIs\nResponses + embeddings", fillcolor="#F8FAFC"];
+    openai [label="OpenAI APIs via AsyncOpenAI\nResponses + embeddings", fillcolor="#F8FAFC"];
   }
 
   user -> react [label="HTTPS"];
   user -> streamlit [label="optional"];
-  nginx -> api [label="REST + X-Username"];
+  nginx -> api [label="async REST + X-Username"];
   streamlit -> api [label="REST + X-Username"];
-  document_service -> ingestion_pipeline [label="ingestion job"];
-  chat_service -> rag_graph [label="question + session history"];
-  repositories -> postgres [label="transactions"];
+  document_service -> ingestion_pipeline [label="bounded concurrent jobs"];
+  chat_service -> rag_graph [label="await question + session history"];
+  repositories -> postgres [label="await transactions"];
   document_service -> uploads [label="source files"];
-  ingestion_pipeline -> qdrant [label="owner-scoped chunks"];
-  ingestion_pipeline -> openai;
-  rag_graph -> qdrant [label="mandatory owner filter"];
-  rag_graph -> openai;
+  ingestion_pipeline -> qdrant [label="await batched owner-scoped upserts"];
+  ingestion_pipeline -> openai [label="await Responses + embeddings"];
+  rag_graph -> qdrant [label="5 parallel searches\nmandatory owner filter"];
+  rag_graph -> openai [label="await rewrite + answer"];
   usage_service -> openai [style=dashed];
 }

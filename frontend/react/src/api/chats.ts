@@ -59,6 +59,7 @@ export function sendChatMessage(options: {
       username: options.username,
       body: jsonBody(options.request),
       signal: options.signal,
+      timeoutMs: 180_000,
     },
   );
 }

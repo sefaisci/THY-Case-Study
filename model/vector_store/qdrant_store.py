@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
+import weakref
 from collections.abc import Sequence
 from typing import Any
 
-from qdrant_client import QdrantClient, models
+from qdrant_client import AsyncQdrantClient, models
 
 from model.usage import UsageCallback, emit_usage, usage_from_response
 
 from .schemas import ChunkRecord
 from .sparse import StableHashSparseEncoder
+
+
+_COLLECTION_LOCKS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[str, asyncio.Lock],
+] = weakref.WeakKeyDictionary()
+
+
+def _collection_lock(collection_name: str) -> asyncio.Lock:
+    """Return one process-wide collection setup lock for the active event loop."""
+
+    loop = asyncio.get_running_loop()
+    by_collection = _COLLECTION_LOCKS.setdefault(loop, {})
+    return by_collection.setdefault(collection_name, asyncio.Lock())
 
 
 def build_user_filter(user_id: str) -> models.Filter:
@@ -85,9 +102,9 @@ class OpenAIEmbedder:
         if not api_key and client is None:
             raise ValueError("OPENAI_API_KEY is required for connected embeddings.")
         if client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
-            client = OpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._client = client
         self.model = model
         self.vector_size = vector_size
@@ -95,7 +112,7 @@ class OpenAIEmbedder:
         self.usage_callback = usage_callback
         self.usage_stage = usage_stage
 
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+    async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed text batches and retain the input order."""
 
         if not texts:
@@ -103,7 +120,7 @@ class OpenAIEmbedder:
         vectors: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             batch = list(texts[start : start + self.batch_size])
-            response = self._client.embeddings.create(model=self.model, input=batch)
+            response = await self._client.embeddings.create(model=self.model, input=batch)
             emit_usage(
                 self.usage_callback,
                 usage_from_response(
@@ -124,10 +141,10 @@ class OpenAIEmbedder:
             )
         return vectors
 
-    def embed_query(self, text: str) -> list[float]:
+    async def embed_query(self, text: str) -> list[float]:
         """Embed a single query using the same configured model."""
 
-        return self.embed_documents([text])[0]
+        return (await self.embed_documents([text]))[0]
 
 
 class QdrantChunkStore:
@@ -144,32 +161,66 @@ class QdrantChunkStore:
         sparse_encoder: StableHashSparseEncoder | None = None,
         client: Any | None = None,
     ) -> None:
-        self.client = client or QdrantClient(url=url, api_key=api_key)
+        self._owns_client = client is None
+        self.client = client or AsyncQdrantClient(url=url, api_key=api_key)
         self.dense_vector_name = dense_vector_name
         self.sparse_vector_name = sparse_vector_name
         self.dense_vector_size = dense_vector_size
         self.sparse_encoder = sparse_encoder or StableHashSparseEncoder()
+        self._ready_collections: set[str] = set()
+        self._close_lock = asyncio.Lock()
+        self._closed = False
 
-    def ensure_compatible_collection(self, collection_name: str) -> None:
+    async def aclose(self) -> None:
+        """Idempotently close only a Qdrant client created by this store."""
+
+        if not self._owns_client or self._closed:
+            return
+        async with self._close_lock:
+            if self._closed:
+                return
+            close = getattr(self.client, "aclose", None) or getattr(
+                self.client,
+                "close",
+                None,
+            )
+            if close is not None:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            self._closed = True
+
+    async def ensure_compatible_collection(self, collection_name: str) -> None:
         """Create a missing collection or reject incompatible vector settings."""
 
-        if not self.client.collection_exists(collection_name):
-            self.client.create_collection(
-                collection_name=collection_name,
-                vectors_config={
-                    self.dense_vector_name: models.VectorParams(
-                        size=self.dense_vector_size,
-                        distance=models.Distance.COSINE,
+        if collection_name in self._ready_collections:
+            return
+        lock = _collection_lock(collection_name)
+        async with lock:
+            if collection_name in self._ready_collections:
+                return
+            exists = await self.client.collection_exists(collection_name)
+            if not exists:
+                try:
+                    await self.client.create_collection(
+                        collection_name=collection_name,
+                        vectors_config={
+                            self.dense_vector_name: models.VectorParams(
+                                size=self.dense_vector_size,
+                                distance=models.Distance.COSINE,
+                            )
+                        },
+                        sparse_vectors_config={
+                            self.sparse_vector_name: models.SparseVectorParams(
+                                modifier=models.Modifier.IDF
+                            )
+                        },
                     )
-                },
-                sparse_vectors_config={
-                    self.sparse_vector_name: models.SparseVectorParams(
-                        modifier=models.Modifier.IDF
-                    )
-                },
-            )
-        else:
-            info = self.client.get_collection(collection_name)
+                except Exception as exc:
+                    message = str(exc).casefold()
+                    if "already exists" not in message:
+                        raise
+            info = await self.client.get_collection(collection_name)
             vectors = info.config.params.vectors
             sparse_vectors = info.config.params.sparse_vectors or {}
             dense_config = vectors.get(self.dense_vector_name) if isinstance(vectors, dict) else None
@@ -183,9 +234,10 @@ class QdrantChunkStore:
                 raise ValueError(
                     f"Collection {collection_name!r} is missing sparse vector {self.sparse_vector_name!r}."
                 )
-        self._ensure_payload_indexes(collection_name)
+            await self._ensure_payload_indexes(collection_name)
+            self._ready_collections.add(collection_name)
 
-    def upsert_chunks(
+    async def upsert_chunks(
         self,
         *,
         collection_name: str,
@@ -198,7 +250,24 @@ class QdrantChunkStore:
             raise ValueError("Chunk and dense-vector counts must match.")
         if not chunks:
             return 0
-        self.ensure_compatible_collection(collection_name)
+        await self.ensure_compatible_collection(collection_name)
+        points = await asyncio.to_thread(
+            self._build_points,
+            collection_name,
+            chunks,
+            dense_vectors,
+        )
+        await self.client.upsert(collection_name=collection_name, points=points, wait=True)
+        return len(points)
+
+    def _build_points(
+        self,
+        collection_name: str,
+        chunks: Sequence[ChunkRecord],
+        dense_vectors: Sequence[Sequence[float]],
+    ) -> list[models.PointStruct]:
+        """Build CPU-bound sparse vectors and point payloads in a worker thread."""
+
         points: list[models.PointStruct] = []
         for chunk, dense in zip(chunks, dense_vectors, strict=True):
             if chunk.collection_name != collection_name:
@@ -220,10 +289,9 @@ class QdrantChunkStore:
                     payload=chunk.payload(),
                 )
             )
-        self.client.upsert(collection_name=collection_name, points=points, wait=True)
-        return len(points)
+        return points
 
-    def count_user_document_points(
+    async def count_user_document_points(
         self,
         *,
         collection_name: str,
@@ -238,14 +306,14 @@ class QdrantChunkStore:
                 models.FieldCondition(key="document_id", match=models.MatchValue(value=document_id)),
             ]
         )
-        response = self.client.count(
+        response = await self.client.count(
             collection_name=collection_name,
             count_filter=query_filter,
             exact=True,
         )
         return int(response.count)
 
-    def delete_user_document_points(
+    async def delete_user_document_points(
         self,
         *,
         collection_name: str,
@@ -258,15 +326,15 @@ class QdrantChunkStore:
         missing collection or an owner/document pair with no points is a no-op.
         """
 
-        if not self.client.collection_exists(collection_name):
+        if not await self.client.collection_exists(collection_name):
             return 0
         point_filter = build_user_document_filter(user_id, document_id)
-        existing = self.client.count(
+        existing = await self.client.count(
             collection_name=collection_name,
             count_filter=point_filter,
             exact=True,
         )
-        self.client.delete(
+        await self.client.delete(
             collection_name=collection_name,
             points_selector=models.FilterSelector(filter=point_filter),
             wait=True,
@@ -280,10 +348,10 @@ class QdrantChunkStore:
         stable_key = f"{collection_name}:{chunk.user_id}:{chunk.document_id}:{chunk.chunk_id}"
         return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
-    def _ensure_payload_indexes(self, collection_name: str) -> None:
+    async def _ensure_payload_indexes(self, collection_name: str) -> None:
         for field_name in ("user_id", "document_id", "document_type", "source_pipeline"):
             try:
-                self.client.create_payload_index(
+                await self.client.create_payload_index(
                     collection_name=collection_name,
                     field_name=field_name,
                     field_schema=models.PayloadSchemaType.KEYWORD,

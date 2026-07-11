@@ -1,38 +1,38 @@
 """Owner-scoped chat session and message queries."""
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ChatMessage, ChatSession
 
 
 class ChatRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    def create_session(self, user_id: str, title: str, identifier: str) -> ChatSession:
+    async def create_session(self, user_id: str, title: str, identifier: str) -> ChatSession:
         chat = ChatSession(user_id=user_id, title=title, session_identifier=identifier)
         self.session.add(chat)
-        self.session.flush()
+        await self.session.flush()
         return chat
 
-    def list_sessions(self, user_id: str) -> list[ChatSession]:
+    async def list_sessions(self, user_id: str) -> list[ChatSession]:
         statement = (
             select(ChatSession)
             .where(ChatSession.user_id == user_id)
             .order_by(ChatSession.last_activity_at.desc(), ChatSession.id)
         )
-        return list(self.session.scalars(statement))
+        return list(await self.session.scalars(statement))
 
-    def get_owned(self, user_id: str, session_id: str) -> ChatSession | None:
-        return self.session.scalar(
+    async def get_owned(self, user_id: str, session_id: str) -> ChatSession | None:
+        return await self.session.scalar(
             select(ChatSession).where(
                 ChatSession.id == session_id,
                 ChatSession.user_id == user_id,
             )
         )
 
-    def list_messages(self, session_id: str, *, limit: int | None = None) -> list[ChatMessage]:
+    async def list_messages(self, session_id: str, *, limit: int | None = None) -> list[ChatMessage]:
         if limit == 0:
             return []
         statement = (
@@ -41,12 +41,12 @@ class ChatRepository:
         )
         if limit is None:
             return list(
-                self.session.scalars(
+                await self.session.scalars(
                     statement.order_by(ChatMessage.created_at, ChatMessage.id)
                 )
             )
         newest_first = list(
-            self.session.scalars(
+            await self.session.scalars(
                 statement.order_by(
                     ChatMessage.created_at.desc(),
                     ChatMessage.id.desc(),
@@ -56,7 +56,7 @@ class ChatRepository:
         newest_first.reverse()
         return newest_first
 
-    def add_message(
+    async def add_message(
         self,
         *,
         session_id: str,
@@ -75,5 +75,5 @@ class ChatRepository:
             reasoning_effort=reasoning_effort,
         )
         self.session.add(message)
-        self.session.flush()
+        await self.session.flush()
         return message

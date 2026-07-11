@@ -16,5 +16,5 @@ router = APIRouter(prefix="/users", tags=["users"])
 )
 async def resolve_user(request: UserResolveRequest, session: DatabaseSession) -> UserResponse:
     service = UserService(session)
-    user, created = service.resolve(request.username)
+    user, created = await service.resolve(request.username)
     return service.response(user, created)

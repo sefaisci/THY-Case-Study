@@ -6,6 +6,16 @@
 # Agent and local workspace metadata
 .agents/
 .codex/
+.playwright-mcp/
+AGENTS.md
+ARCHITECTURE.md
+TASKS.md
+
+# Local LangGraph reference exports used during architecture analysis
+1-parallelization.html
+2-sub-graph.html
+3-map-reduce.html
+4-research-assistant.html
 
 # Python and notebook runtime artifacts
 __pycache__/

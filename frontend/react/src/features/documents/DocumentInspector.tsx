@@ -28,12 +28,13 @@ import type {
   CollectionScope,
   DocumentResponse,
   IngestionMethod,
+  IngestionJobResponse,
   ModelCatalogResponse,
   ReasoningEffort,
   UploadConfiguration,
 } from "../../api/contracts";
 import { deleteDocument, uploadDocuments } from "../../api/documents";
-import { getIngestionJob, startIngestion } from "../../api/ingestion";
+import { getIngestionJobs, startIngestion } from "../../api/ingestion";
 import { normalizeUsernameKey, queryKeys } from "../../app/queryKeys";
 import { formatBytes, formatTimestamp } from "../../lib/format";
 import {
@@ -167,48 +168,23 @@ function ModelSelect({
 }
 
 function ActiveJobRow({
-  username,
   job,
-  onNotice,
+  remoteJob,
 }: {
-  username: string;
   job: ActiveIngestionJob;
-  onNotice: (notice: WorkspaceNotice) => void;
+  remoteJob: IngestionJobResponse | undefined;
 }) {
-  const queryClient = useQueryClient();
-  const removeActiveJob = useWorkspaceStore((state) => state.removeActiveJob);
-  const jobQuery = useQuery({
-    queryKey: queryKeys.ingestion.job(username, job.id),
-    queryFn: ({ signal }) => getIngestionJob(username, job.id, signal),
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status === "completed" || status === "failed" ? false : 1750;
-    },
-    staleTime: 0,
-  });
-  const status = jobQuery.data?.status ?? job.status;
-
-  useEffect(() => {
-    if (status !== "completed" && status !== "failed") return;
-    removeActiveJob(username, job.id);
-    void queryClient.invalidateQueries({ queryKey: queryKeys.documents.list(username) });
-    onNotice(
-      status === "completed"
-        ? {
-            kind: "success",
-            title: "Ingestion completed",
-            message: "Ingestion completed successfully.",
-          }
-        : {
-            kind: "error",
-            title: "Ingestion failed",
-            message:
-              jobQuery.data?.failure_message ??
-              "Ingestion failed. Review the document status and retry.",
-          },
-    );
-  }, [job.id, jobQuery.data?.failure_message, onNotice, queryClient, removeActiveJob, status, username]);
-
+  const status = remoteJob?.status ?? job.status;
+  const totalPages = remoteJob?.total_pages ?? 0;
+  const processedPages = Math.min(remoteJob?.processed_pages ?? 0, totalPages);
+  const progressPercent = remoteJob?.progress_percent ?? 0;
+  const hasPageCount = totalPages > 0;
+  const progressLabel =
+    status === "pending"
+      ? "Queued for processing"
+      : hasPageCount
+        ? `${processedPages} of ${totalPages} pages processed`
+        : "Determining page count";
   return (
     <div className="active-job-row">
       <div className="active-job-row__icon">
@@ -216,12 +192,104 @@ function ActiveJobRow({
       </div>
       <div>
         <strong>{job.filename}</strong>
-        <span>{status === "pending" ? "Queued for processing" : "Creating and storing chunks"}</span>
-        <div className="indeterminate-progress" aria-label="Ingestion processing">
-          <span />
+        <div className="active-job-row__progress-label">
+          <span>{progressLabel}</span>
+          <span>{hasPageCount ? `${progressPercent}%` : "Preparing…"}</span>
+        </div>
+        <div
+          className={`indeterminate-progress${hasPageCount ? " indeterminate-progress--determinate" : ""}`}
+          role="progressbar"
+          aria-label={`${job.filename} ingestion progress`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={hasPageCount ? progressPercent : undefined}
+        >
+          <span style={hasPageCount ? { width: `${progressPercent}%` } : undefined} />
         </div>
       </div>
     </div>
+  );
+}
+
+function ActiveJobsPanel({
+  username,
+  jobs,
+  onNotice,
+}: {
+  username: string;
+  jobs: ActiveIngestionJob[];
+  onNotice: (notice: WorkspaceNotice) => void;
+}) {
+  const queryClient = useQueryClient();
+  const removeActiveJob = useWorkspaceStore((state) => state.removeActiveJob);
+  const jobIds = useMemo(() => jobs.map((job) => job.id).sort(), [jobs]);
+  const reportedTerminalJobs = useRef(new Set<string>());
+  const reportedPollingFailure = useRef(false);
+  const jobsQuery = useQuery({
+    queryKey: queryKeys.ingestion.jobs(username, jobIds),
+    queryFn: ({ signal }) => getIngestionJobs(username, jobIds, signal),
+    enabled: jobIds.length > 0,
+    refetchInterval: (query) => {
+      const statuses = query.state.data?.jobs.map((job) => job.status) ?? [];
+      return statuses.length > 0 && statuses.every((status) => status === "completed" || status === "failed")
+        ? false
+        : 1750;
+    },
+    staleTime: 0,
+  });
+  const remoteById = useMemo(
+    () => new Map((jobsQuery.data?.jobs ?? []).map((job) => [job.id, job])),
+    [jobsQuery.data?.jobs],
+  );
+
+  useEffect(() => {
+    const terminal = (jobsQuery.data?.jobs ?? []).filter(
+      (job) => job.status === "completed" || job.status === "failed",
+    );
+    if (terminal.length === 0) return;
+    for (const job of terminal) {
+      removeActiveJob(username, job.id);
+      if (reportedTerminalJobs.current.has(job.id)) continue;
+      reportedTerminalJobs.current.add(job.id);
+      onNotice(
+        job.status === "completed"
+          ? {
+              kind: "success",
+              title: "Ingestion completed",
+              message: "Ingestion completed successfully.",
+            }
+          : {
+              kind: "error",
+              title: "Ingestion failed",
+              message:
+                job.failure_message ??
+                "Ingestion failed. Review the document status and retry.",
+            },
+      );
+    }
+    void queryClient.invalidateQueries({ queryKey: queryKeys.documents.list(username) });
+  }, [jobsQuery.data?.jobs, onNotice, queryClient, removeActiveJob, username]);
+
+  useEffect(() => {
+    if (!jobsQuery.isError || reportedPollingFailure.current) return;
+    reportedPollingFailure.current = true;
+    onNotice(errorNotice(jobsQuery.error, "Ingestion status could not be refreshed"));
+  }, [jobsQuery.error, jobsQuery.isError, onNotice]);
+
+  return (
+    <section className="inspector-section active-jobs" aria-live="polite">
+      <div className="section-heading-row">
+        <h3>Ingestion jobs</h3>
+        <span>{jobs.length} active</span>
+      </div>
+      {jobs.map((job) => (
+        <ActiveJobRow
+          key={job.id}
+          job={job}
+          remoteJob={remoteById.get(job.id)}
+        />
+      ))}
+    </section>
   );
 }
 
@@ -659,15 +727,7 @@ export function DocumentInspector({
           </div>
 
           {username && activeJobs.length > 0 ? (
-            <section className="inspector-section active-jobs" aria-live="polite">
-              <div className="section-heading-row">
-                <h3>Ingestion jobs</h3>
-                <span>{activeJobs.length} active</span>
-              </div>
-              {activeJobs.map((job) => (
-                <ActiveJobRow key={job.id} username={username} job={job} onNotice={onNotice} />
-              ))}
-            </section>
+            <ActiveJobsPanel username={username} jobs={activeJobs} onNotice={onNotice} />
           ) : null}
 
           <section className="inspector-section document-library">

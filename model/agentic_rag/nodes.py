@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass
+
+from langgraph.types import Send
 
 from .adapters import RagAdapters
 from .schemas import (
@@ -13,11 +16,14 @@ from .schemas import (
     CitationValidationResult,
     CollectionName,
     NodeError,
+    QueryVariant,
     RagResponse,
     RagState,
     ReflectionResult,
     RetrievalPlan,
+    RetrievalQueryRewrite,
     RetrievedChunk,
+    VariantRetrievalResult,
 )
 from .settings import RagSettings
 
@@ -32,37 +38,42 @@ class RagNodeSet:
     adapters: RagAdapters
     settings: RagSettings
 
-    def query_understanding(self, state: RagState) -> dict:
+    async def query_understanding(self, state: RagState) -> dict:
         """Normalize the user question and assign a coarse intent label."""
 
         question = state.get("question", "").strip()
         normalized = re.sub(r"\s+", " ", question)
         intent = _infer_query_intent(normalized)
         documents_available = self.settings.allowed_document_ids != ()
-        retrieval_query = _build_retrieval_query(
+        resolved_query = _build_retrieval_query(
             normalized,
             state.get("conversation_history", []),
         )
+        rewrite: RetrievalQueryRewrite | None = None
         if (
             documents_available
             and intent != "conversation_history"
             and self.adapters.query_rewriter is not None
         ):
             try:
-                rewrite = self.adapters.query_rewriter.rewrite(retrieval_query)
-                retrieval_query = _combine_query_variants(
-                    rewrite.standalone_query,
-                    rewrite.english_query,
-                )
+                rewrite = await self.adapters.query_rewriter.rewrite(resolved_query)
             except Exception:
                 logger.warning(
                     "Retrieval query rewrite failed; using the deterministic fallback.",
                     extra={"event": "retrieval_query_rewrite_fallback"},
                     exc_info=True,
                 )
+        variants = _build_five_query_variants(
+            verbatim_query=normalized,
+            resolved_query=resolved_query,
+            rewrite=rewrite,
+        )
         return {
             "normalized_question": normalized,
-            "retrieval_query": retrieval_query,
+            # Preserve the public standalone-query contract. The five map inputs
+            # live in ``query_variants`` and must not be flattened into this field.
+            "retrieval_query": resolved_query,
+            "query_variants": variants,
             "query_intent": intent,
             "documents_available": documents_available,
         }
@@ -73,7 +84,13 @@ class RagNodeSet:
         question = state.get("normalized_question") or state.get("question", "")
         intent = state.get("query_intent", "general")
         collection_scope = state.get("collection_scope", "both")
-        collections = _select_collections(question, intent, collection_scope)
+        collections = _select_collections(
+            question,
+            intent,
+            collection_scope,
+            semantic_collection=self.settings.semantic_collection,
+            docling_collection=self.settings.docling_collection,
+        )
         plan = RetrievalPlan(
             collections=collections,
             top_k=self.settings.retrieval_top_k,
@@ -90,39 +107,96 @@ class RagNodeSet:
             "checked_collections": collections,
         }
 
-    def hybrid_retrieval(self, state: RagState) -> dict:
-        """Run user-scoped hybrid retrieval through the injected adapter."""
+    def dispatch_query_variants(self, state: RagState) -> list[Send]:
+        """Create exactly one map task for each typed query variant."""
 
+        return [
+            Send(
+                "retrieve_variant",
+                {
+                    "query_variant": variant,
+                    "retrieval_plan": state["retrieval_plan"],
+                    "user_id": state["user_id"],
+                },
+            )
+            for variant in state["query_variants"]
+        ]
+
+    async def retrieve_variant(self, state: RagState) -> dict:
+        """Independently embed and search all scoped collections for one variant."""
+
+        variant = state["query_variant"]
         try:
             user_id = state["user_id"]
-            retrieval_query = (
-                state.get("retrieval_query")
-                or state.get("normalized_question")
-                or state["question"]
-            )
             plan = state["retrieval_plan"]
-            dense_vector = self.adapters.embedding.embed_query(retrieval_query)
-            chunks = self.adapters.retrieval.retrieve(
-                query=retrieval_query,
+            dense_vector = await self.adapters.embedding.embed_query(
+                variant.text,
+                metadata={
+                    "query_variant_id": variant.id,
+                    "query_variant_kind": variant.kind,
+                    "query_sha256": hashlib.sha256(
+                        variant.text.encode("utf-8")
+                    ).hexdigest(),
+                },
+            )
+            result = await self.adapters.retrieval.retrieve(
+                query=variant.text,
                 dense_vector=dense_vector,
                 plan=plan,
                 user_id=user_id,
             )
-            return {"retrieved_chunks": chunks}
+            return {
+                "variant_results": [
+                    VariantRetrievalResult(
+                        variant=variant,
+                        chunks=result.chunks,
+                        errors=result.errors,
+                    )
+                ]
+            }
         except Exception as exc:  # pragma: no cover - exercised in connected runs
             return {
-                "retrieved_chunks": [],
-                "errors": [NodeError(node="hybrid_retrieval", message=str(exc))],
+                "variant_results": [
+                    VariantRetrievalResult(
+                        variant=variant,
+                        errors=[
+                            NodeError(
+                                node=f"retrieve_variant:{variant.id}",
+                                message=str(exc),
+                            )
+                        ],
+                    )
+                ]
             }
 
-    def reranking(self, state: RagState) -> dict:
+    def fuse_variant_results(self, state: RagState) -> dict:
+        """Reduce all map outputs into one deterministic candidate ranking."""
+
+        chunks = _fuse_variant_results(
+            state.get("variant_results", []),
+            state["retrieval_plan"],
+        )
+        errors = [
+            NodeError(
+                node=f"{error.node}:{result.variant.id}",
+                message=error.message,
+            )
+            for result in state.get("variant_results", [])
+            for error in result.errors
+        ]
+        return {
+            "retrieved_chunks": chunks,
+            "errors": sorted(errors, key=lambda item: (item.node, item.message)),
+        }
+
+    async def reranking(self, state: RagState) -> dict:
         """Rerank retrieved chunks while preserving citation metadata."""
 
         try:
             plan = state["retrieval_plan"]
             question = state.get("normalized_question") or state["question"]
             chunks = state.get("retrieved_chunks", [])
-            reranked = self.adapters.reranker.rerank(
+            reranked = await self.adapters.reranker.rerank(
                 question=question,
                 chunks=chunks,
                 limit=plan.rerank_top_k,
@@ -145,7 +219,7 @@ class RagNodeSet:
                 "errors": [NodeError(node="reranking", message=str(exc))],
             }
 
-    def answer_generation(self, state: RagState) -> dict:
+    async def answer_generation(self, state: RagState) -> dict:
         """Generate an answer only from the retrieved evidence."""
 
         chunks = state.get("reranked_chunks") or state.get("retrieved_chunks", [])
@@ -169,7 +243,7 @@ class RagNodeSet:
             conversation_history=state.get("conversation_history", []),
         )
         try:
-            answer = self.adapters.llm.complete(
+            answer = await self.adapters.llm.complete(
                 system_prompt,
                 user_prompt,
                 reasoning_effort=self.settings.self_service_reasoning_effort,
@@ -186,7 +260,7 @@ class RagNodeSet:
                 "errors": [NodeError(node="answer_generation", message=str(exc))],
             }
 
-    def conversation_generation(self, state: RagState) -> dict:
+    async def conversation_generation(self, state: RagState) -> dict:
         """Generate a citation-free answer from only this chat session's context."""
 
         system_prompt = (
@@ -206,10 +280,12 @@ class RagNodeSet:
             conversation_history=state.get("conversation_history", []),
         )
         try:
-            answer = self.adapters.llm.complete(
-                system_prompt,
-                user_prompt,
-                reasoning_effort=self.settings.self_service_reasoning_effort,
+            answer = (
+                await self.adapters.llm.complete(
+                    system_prompt,
+                    user_prompt,
+                    reasoning_effort=self.settings.self_service_reasoning_effort,
+                )
             ).strip()
             if not answer:
                 raise RuntimeError("The conversational model returned an empty response.")
@@ -259,7 +335,7 @@ class RagNodeSet:
             chunk_id
             for chunk_id in cited_chunk_ids
             if chunk_id in chunk_by_id
-            and chunk_by_id[chunk_id].effective_score < self.settings.citation_min_score
+            and chunk_by_id[chunk_id].retrieval_score < self.settings.citation_min_score
         ]
         unknown = list(dict.fromkeys([*unknown, *weak]))
         missing_sentences = [
@@ -284,7 +360,11 @@ class RagNodeSet:
             missing_citation_sentences=missing_sentences,
         )
         citations = [
-            _chunk_to_citation(chunk_by_id[chunk_id], self.settings.citation_min_score)
+            _chunk_to_citation(
+                chunk_by_id[chunk_id],
+                self.settings.citation_min_score,
+                semantic_collection=self.settings.semantic_collection,
+            )
             for chunk_id in valid_ids
         ]
         return {
@@ -293,7 +373,7 @@ class RagNodeSet:
             "no_answer": not validation.is_valid,
         }
 
-    def claim_evidence_reflection(self, state: RagState) -> dict:
+    async def claim_evidence_reflection(self, state: RagState) -> dict:
         """Run structured LLM claim-evidence evaluation after deterministic validation."""
 
         validation = state.get("citation_validation")
@@ -318,7 +398,7 @@ class RagNodeSet:
         chunk_by_id = {chunk.chunk_id: chunk for chunk in chunks}
         cited_chunks = [chunk_by_id[chunk_id] for chunk_id in validation.cited_chunk_ids]
         try:
-            reflection = self.adapters.grounding.evaluate(
+            reflection = await self.adapters.grounding.evaluate(
                 question=state.get("normalized_question") or state["question"],
                 draft_answer=draft_answer,
                 cited_chunks=cited_chunks,
@@ -366,10 +446,10 @@ class RagNodeSet:
                 "errors": [NodeError(node="claim_evidence_reflection", message=str(exc))],
             }
 
-    def reflection(self, state: RagState) -> dict:
+    async def reflection(self, state: RagState) -> dict:
         """Backward-compatible alias for the claim-evidence reflection node."""
 
-        return self.claim_evidence_reflection(state)
+        return await self.claim_evidence_reflection(state)
 
     def final_response(self, state: RagState) -> dict:
         """Return a grounded final answer or an explicit no-answer response."""
@@ -488,27 +568,157 @@ def _select_collections(
     question: str,
     intent: str,
     collection_scope: str = "both",
+    *,
+    semantic_collection: str = "semantic_chunks",
+    docling_collection: str = "docling_fixed_chunks",
 ) -> list[CollectionName]:
     if collection_scope == "semantic":
-        return ["semantic_chunks"]
+        return [semantic_collection]
     if collection_scope == "docling":
-        return ["docling_fixed_chunks"]
+        return [docling_collection]
     if collection_scope == "both":
-        return ["semantic_chunks", "docling_fixed_chunks"]
+        return [semantic_collection, docling_collection]
     lowered = question.lower()
     if intent == "visual_or_layout":
-        return ["semantic_chunks"]
+        return [semantic_collection]
     if intent == "textual_lookup":
-        return ["docling_fixed_chunks"]
+        return [docling_collection]
     if "semantic" in lowered and "docling" not in lowered:
-        return ["semantic_chunks"]
+        return [semantic_collection]
     if "docling" in lowered and "semantic" not in lowered:
-        return ["docling_fixed_chunks"]
-    return ["semantic_chunks", "docling_fixed_chunks"]
+        return [docling_collection]
+    return [semantic_collection, docling_collection]
+
+
+def _build_five_query_variants(
+    *,
+    verbatim_query: str,
+    resolved_query: str,
+    rewrite: RetrievalQueryRewrite | None,
+) -> list[QueryVariant]:
+    """Build exactly five stable, distinct retrieval map inputs."""
+
+    generated = {
+        "standalone": (
+            rewrite.standalone_query
+            if rewrite is not None
+            else f"Standalone document request: {resolved_query}"
+        ),
+        "english": (
+            rewrite.english_query
+            if rewrite is not None
+            else f"Cross-language document request: {resolved_query}"
+        ),
+        "keywords": (
+            rewrite.keyword_query
+            if rewrite is not None
+            else f"Document keywords and identifiers: {resolved_query}"
+        ),
+        "source_style": (
+            rewrite.source_style_query
+            if rewrite is not None
+            else f"Relevant source passage concerning: {resolved_query}"
+        ),
+    }
+    definitions = [
+        ("01-verbatim", "verbatim", verbatim_query, 1.0),
+        ("02-standalone", "standalone", generated["standalone"], 1.0),
+        ("03-english", "english", generated["english"], 0.90),
+        ("04-keywords", "keywords", generated["keywords"], 0.85),
+        ("05-source-style", "source_style", generated["source_style"], 0.75),
+    ]
+    used: set[str] = set()
+    variants: list[QueryVariant] = []
+    for variant_id, kind, candidate, weight in definitions:
+        text = re.sub(r"\s+", " ", candidate.strip()) or resolved_query
+        canonical = text.casefold()
+        if canonical in used:
+            text = f"{kind.replace('_', ' ').title()} retrieval form: {text}"
+            canonical = text.casefold()
+        suffix = 2
+        while canonical in used:
+            text = f"{text} ({suffix})"
+            canonical = text.casefold()
+            suffix += 1
+        used.add(canonical)
+        variants.append(
+            QueryVariant(
+                id=variant_id,
+                kind=kind,
+                text=text,
+                weight=weight,
+            )
+        )
+    if len(variants) != 5 or len({item.text.casefold() for item in variants}) != 5:
+        raise RuntimeError("Query planning must produce exactly five distinct variants.")
+    return variants
+
+
+def _fuse_variant_results(
+    results: list[VariantRetrievalResult],
+    plan: RetrievalPlan,
+) -> list[RetrievedChunk]:
+    """Apply deterministic weighted RRF while retaining maximum raw scores."""
+
+    rrf_k = 60.0
+    representatives: dict[tuple[str, str], RetrievedChunk] = {}
+    fusion: dict[tuple[str, str], float] = {}
+    matched: dict[tuple[str, str], set[str]] = {}
+    total_weight = sum(result.variant.weight for result in results)
+    max_fusion = total_weight / (rrf_k + 1.0) if total_weight else 1.0
+
+    for result in sorted(results, key=lambda item: item.variant.id):
+        for rank, chunk in enumerate(result.chunks, start=1):
+            key = (chunk.collection_name, chunk.chunk_id)
+            current = representatives.get(key)
+            if current is None or _representative_chunk_key(chunk) < _representative_chunk_key(current):
+                representatives[key] = chunk
+            fusion[key] = fusion.get(key, 0.0) + (
+                result.variant.weight / (rrf_k + rank)
+            )
+            matched.setdefault(key, set()).add(result.variant.id)
+
+    collection_order = {
+        collection: index for index, collection in enumerate(plan.collections)
+    }
+    fused = [
+        chunk.model_copy(
+            update={
+                "fusion_score": fusion[key] / max_fusion,
+                "matched_variant_ids": sorted(matched[key]),
+                "rerank_score": None,
+            }
+        )
+        for key, chunk in representatives.items()
+    ]
+    fused.sort(
+        key=lambda item: (
+            -item.fusion_score,
+            -item.retrieval_score,
+            collection_order.get(item.collection_name, len(collection_order)),
+            item.document_id,
+            item.chunk_id,
+        )
+    )
+    return fused[: plan.top_k]
+
+
+def _representative_chunk_key(chunk: RetrievedChunk) -> tuple:
+    """Choose the strongest duplicate independent of branch completion order."""
+
+    return (
+        -chunk.retrieval_score,
+        chunk.collection_name,
+        chunk.document_id,
+        chunk.chunk_id,
+        chunk.document_name,
+    )
 
 
 def _has_sufficient_evidence(chunks: list[RetrievedChunk], min_score: float) -> bool:
-    return bool(chunks) and max(chunk.effective_score for chunk in chunks) >= min_score
+    """Apply calibrated evidence thresholds to raw Qdrant scores, not fusion scores."""
+
+    return bool(chunks) and max(chunk.retrieval_score for chunk in chunks) >= min_score
 
 
 def _build_grounded_answer_prompt(
@@ -524,7 +734,7 @@ def _build_grounded_answer_prompt(
             f"Source excerpt: {chunk.source_excerpt}\n"
             f"Document: {chunk.document_name}; Location: {chunk.display_location}; "
             f"Chunk: {chunk.chunk_id}; Collection: {chunk.collection_name}; "
-            f"Score: {chunk.effective_score:.3f}"
+            f"Raw score: {chunk.retrieval_score:.3f}; Fusion score: {chunk.fusion_score:.6f}"
         )
     evidence = "\n\n".join(evidence_lines)
     history_lines = []
@@ -603,8 +813,13 @@ def _is_explicit_no_answer(answer: str) -> bool:
     )
 
 
-def _chunk_to_citation(chunk: RetrievedChunk, citation_min_score: float) -> Citation:
-    grounding = "grounded" if chunk.effective_score >= citation_min_score else "weak"
+def _chunk_to_citation(
+    chunk: RetrievedChunk,
+    citation_min_score: float,
+    *,
+    semantic_collection: str = "semantic_chunks",
+) -> Citation:
+    grounding = "grounded" if chunk.retrieval_score >= citation_min_score else "weak"
     return Citation(
         document_name=chunk.document_name,
         document_id=chunk.document_id,
@@ -612,10 +827,10 @@ def _chunk_to_citation(chunk: RetrievedChunk, citation_min_score: float) -> Cita
         slide_number=chunk.slide_number,
         chunk_id=chunk.chunk_id,
         source_excerpt=chunk.source_excerpt,
-        retrieval_score=chunk.effective_score,
+        retrieval_score=chunk.retrieval_score,
         collection_name=chunk.collection_name,
         ingestion_method=(
-            "semantic" if chunk.collection_name == "semantic_chunks" else "docling"
+            "semantic" if chunk.collection_name == semantic_collection else "docling"
         ),
         source_pipeline=chunk.source_pipeline,
         grounding_indicator=grounding,

@@ -741,6 +741,10 @@ textarea {
   margin-bottom: 0;
 }
 
+.assistant-markdown--loading {
+  white-space: pre-wrap;
+}
+
 .assistant-markdown p,
 .assistant-markdown ul,
 .assistant-markdown ol,
@@ -779,6 +783,27 @@ textarea {
   color: var(--blue);
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
+}
+
+.assistant-markdown .katex {
+  color: var(--navy-950);
+  font-size: 1.06em;
+}
+
+.assistant-markdown .katex-display {
+  max-width: 100%;
+  margin: 1rem 0;
+  padding: 0.75rem 0.9rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--slate-50);
+  border: 1px solid var(--slate-150);
+  border-radius: 8px;
+  scrollbar-width: thin;
+}
+
+.assistant-markdown .katex-display > .katex {
+  min-width: max-content;
 }
 
 .chat-loading {
@@ -1403,6 +1428,7 @@ textarea {
 
 .model-control-grid {
   display: grid;
+  align-items: end;
   gap: 8px;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
 }
@@ -1558,6 +1584,26 @@ textarea {
   font-size: 0.59rem;
 }
 
+.active-job-row__progress-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.active-job-row__progress-label span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-job-row__progress-label span:last-child {
+  flex: 0 0 auto;
+  color: var(--navy-700);
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
 .indeterminate-progress {
   height: 3px;
   margin-top: 6px;
@@ -1572,6 +1618,12 @@ textarea {
   height: 100%;
   background: var(--thy-red);
   animation: progress 1.5s ease-in-out infinite alternate;
+}
+
+.indeterminate-progress--determinate span {
+  animation: none;
+  transform: none;
+  transition: width 220ms ease;
 }
 
 @keyframes progress {

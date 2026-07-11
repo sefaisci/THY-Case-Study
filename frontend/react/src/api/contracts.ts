@@ -122,6 +122,9 @@ export interface IngestionJobResponse {
   id: string;
   document_id: string;
   status: IngestionJobStatus;
+  total_pages: number;
+  processed_pages: number;
+  progress_percent: number;
   chunk_count: number;
   point_count: number;
   started_at: string | null;
@@ -139,6 +142,14 @@ export interface IngestionJobResponse {
 export interface IngestionBatchResponse {
   jobs: IngestionJobResponse[];
   message: string;
+}
+
+export interface IngestionStatusBatchRequest {
+  job_ids: string[];
+}
+
+export interface IngestionStatusBatchResponse {
+  jobs: IngestionJobResponse[];
 }
 
 export interface DocumentDeleteResponse {

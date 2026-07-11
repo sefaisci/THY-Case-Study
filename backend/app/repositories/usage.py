@@ -1,21 +1,21 @@
 """Usage record persistence and owner-scoped retrieval."""
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import UsageRecord
 
 
 class UsageRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    def add(self, record: UsageRecord) -> UsageRecord:
+    async def add(self, record: UsageRecord) -> UsageRecord:
         self.session.add(record)
-        self.session.flush()
+        await self.session.flush()
         return record
 
-    def list_for_user(
+    async def list_for_user(
         self,
         user_id: str,
         *,
@@ -29,4 +29,4 @@ class UsageRepository:
         if message_id:
             statement = statement.where(UsageRecord.chat_message_id == message_id)
         statement = statement.order_by(UsageRecord.created_at.desc()).limit(limit)
-        return list(self.session.scalars(statement))
+        return list(await self.session.scalars(statement))

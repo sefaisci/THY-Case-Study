@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-CollectionName = Literal["semantic_chunks", "docling_fixed_chunks"]
+CollectionName = str
 DocumentType = Literal["pdf", "docx", "pptx"]
 
 
@@ -15,7 +15,7 @@ class ChunkRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    collection_name: CollectionName
+    collection_name: CollectionName = Field(min_length=1)
     collection_type: Literal["semantic", "docling_fixed"]
     user_id: str = Field(min_length=1)
     document_id: str = Field(min_length=1)

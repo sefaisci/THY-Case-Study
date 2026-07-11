@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from model.usage import ModelUsage
 
@@ -15,12 +15,12 @@ from .pricing import PricingRegistry
 
 
 class UsageService:
-    def __init__(self, session: Session, pricing: PricingRegistry) -> None:
+    def __init__(self, session: AsyncSession, pricing: PricingRegistry) -> None:
         self.session = session
         self.repository = UsageRepository(session)
         self.pricing = pricing
 
-    def persist_events(
+    async def persist_events(
         self,
         events: Iterable[ModelUsage],
         *,
@@ -36,7 +36,7 @@ class UsageService:
         for event in events:
             price = self.pricing.calculate(event)
             records.append(
-                self.repository.add(
+                await self.repository.add(
                     UsageRecord(
                         user_id=user_id,
                         document_id=document_id,
@@ -63,7 +63,7 @@ class UsageService:
             )
         return records
 
-    def record_not_applicable(
+    async def record_not_applicable(
         self,
         *,
         user_id: str,
@@ -74,7 +74,7 @@ class UsageService:
         chat_session_id: str | None = None,
         chat_message_id: str | None = None,
     ) -> UsageRecord:
-        return self.repository.add(
+        return await self.repository.add(
             UsageRecord(
                 user_id=user_id,
                 document_id=document_id,

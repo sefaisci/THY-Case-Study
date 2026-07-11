@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, Header
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings, get_settings
 from ..database import get_db
@@ -14,7 +14,7 @@ from ..exceptions import AppError
 from ..models import User
 from ..services import ModelCatalogService, UserService
 
-DatabaseSession = Annotated[Session, Depends(get_db)]
+DatabaseSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def get_application_settings() -> Settings:
@@ -45,7 +45,11 @@ async def get_current_user(
             code="username_required",
             status_code=401,
         )
-    user, _ = UserService(session).resolve(username)
+    user, _ = await UserService(session).resolve(username)
+    # End the identity lookup transaction before route services perform any
+    # potentially long OpenAI, Qdrant, rendering, or file-storage operation.
+    # ``expire_on_commit=False`` keeps the resolved owner fields available.
+    await session.commit()
     return user
 
 

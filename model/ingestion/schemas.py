@@ -25,6 +25,7 @@ class DocumentIngestionResult(BaseModel):
     document_type: Literal["pdf", "docx", "pptx"]
     method: IngestionMethod
     status: Literal["completed", "partial", "failed", "skipped"]
+    total_locations: int = Field(default=0, ge=0)
     processed_locations: int = 0
     chunk_count: int = 0
     point_count: int = 0

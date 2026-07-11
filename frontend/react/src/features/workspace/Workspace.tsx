@@ -6,6 +6,7 @@ import { createChatSession, listChatMessages, listChatSessions, sendChatMessage 
 import type {
   CatalogModel,
   ChatMessageResponse,
+  CollectionScope,
   ReasoningEffort,
 } from "../../api/contracts";
 import { listDocuments } from "../../api/documents";
@@ -18,6 +19,15 @@ import { ChatWorkspace } from "../chat/ChatWorkspace";
 import { DocumentInspector } from "../documents/DocumentInspector";
 import { ConversationRail } from "../navigation/ConversationRail";
 import type { TurnUsageByMessage, WorkspaceNotice } from "./types";
+
+interface ChatSubmission {
+  username: string;
+  question: string;
+  sessionId: string | null;
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  collectionScope: CollectionScope;
+}
 
 function selectModel(
   models: CatalogModel[],
@@ -153,43 +163,47 @@ export function Workspace() {
   });
 
   const createChatMutation = useMutation({
-    mutationFn: () => createChatSession(username ?? ""),
-    onSuccess: (session) => {
-      if (!username) return;
-      queryClient.setQueryData(queryKeys.chats.sessions(username), (current: typeof sessions | undefined) => [
+    mutationFn: (mutationUsername: string) => createChatSession(mutationUsername),
+    onSuccess: (session, mutationUsername) => {
+      queryClient.setQueryData(queryKeys.chats.sessions(mutationUsername), (current: typeof sessions | undefined) => [
         session,
         ...(current ?? []).filter((item) => item.id !== session.id),
       ]);
-      queryClient.setQueryData(queryKeys.chats.messages(username, session.id), []);
-      setActiveChatId(session.id);
-      setLeftMobileOpen(false);
+      queryClient.setQueryData(queryKeys.chats.messages(mutationUsername, session.id), []);
+      if (useWorkspaceStore.getState().username === mutationUsername) {
+        setActiveChatId(session.id);
+        setLeftMobileOpen(false);
+      }
     },
-    onError: (error) => showNotice(mutationError(error, "Chat could not be created")),
+    onError: (error, mutationUsername) => {
+      if (useWorkspaceStore.getState().username === mutationUsername) {
+        showNotice(mutationError(error, "Chat could not be created"));
+      }
+    },
   });
 
   const sendMutation = useMutation({
-    mutationFn: async (question: string) => {
-      if (!username || !chatSelection.model || !chatSelection.effort) {
-        throw new Error("The workspace and chat model must be selected.");
-      }
-      const sessionId = effectiveChatId ?? (await createChatSession(username)).id;
+    mutationFn: async (submission: ChatSubmission) => {
+      const sessionId =
+        submission.sessionId ?? (await createChatSession(submission.username)).id;
       const turn = await sendChatMessage({
-        username,
+        username: submission.username,
         sessionId,
         request: {
-          question,
-          chat_model: chatSelection.model,
-          chat_reasoning_effort: chatSelection.effort,
-          collection_scope: collectionScope,
+          question: submission.question,
+          chat_model: submission.model,
+          chat_reasoning_effort: submission.reasoningEffort,
+          collection_scope: submission.collectionScope,
         },
       });
-      return { sessionId, turn };
+      return { submission, sessionId, turn };
     },
-    onSuccess: ({ sessionId, turn }) => {
-      if (!username) return;
-      setActiveChatId(sessionId);
+    onSuccess: ({ submission, sessionId, turn }) => {
+      if (useWorkspaceStore.getState().username === submission.username) {
+        setActiveChatId(sessionId);
+      }
       queryClient.setQueryData<ChatMessageResponse[]>(
-        queryKeys.chats.messages(username, sessionId),
+        queryKeys.chats.messages(submission.username, sessionId),
         (current) => {
           const existingIds = new Set((current ?? []).map((message) => message.id));
           return [
@@ -204,9 +218,15 @@ export function Workspace() {
         ...current,
         [turn.assistant_message.id]: turn,
       }));
-      void queryClient.invalidateQueries({ queryKey: queryKeys.chats.sessions(username) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.chats.sessions(submission.username),
+      });
     },
-    onError: (error) => showNotice(mutationError(error, "Answer generation failed")),
+    onError: (error, submission) => {
+      if (useWorkspaceStore.getState().username === submission.username) {
+        showNotice(mutationError(error, "Answer generation failed"));
+      }
+    },
     onSettled: () => setPendingQuestion(null),
   });
 
@@ -243,9 +263,23 @@ export function Workspace() {
   }
 
   function handleSend(question: string) {
-    if (sendMutation.isPending) return;
+    if (
+      sendMutation.isPending ||
+      !username ||
+      !chatSelection.model ||
+      !chatSelection.effort
+    ) {
+      return;
+    }
     setPendingQuestion(question);
-    sendMutation.mutate(question);
+    sendMutation.mutate({
+      username,
+      question,
+      sessionId: effectiveChatId,
+      model: chatSelection.model,
+      reasoningEffort: chatSelection.effort,
+      collectionScope,
+    });
   }
 
   return (
@@ -261,7 +295,9 @@ export function Workspace() {
         mobileOpen={leftMobileOpen}
         onUsernameDraftChange={setUsernameDraft}
         onResolveUsername={handleResolveUsername}
-        onCreateChat={() => createChatMutation.mutate()}
+        onCreateChat={() => {
+          if (username) createChatMutation.mutate(username);
+        }}
         onSelectChat={(sessionId) => {
           setActiveChatId(sessionId);
           setLeftMobileOpen(false);

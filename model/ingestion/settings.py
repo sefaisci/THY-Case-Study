@@ -39,6 +39,8 @@ class IngestionSettings:
     embedding_batch_size: int
     llm_request_timeout_seconds: int
     semantic_flush_batch_size: int = 32
+    semantic_page_max_concurrency: int = 3
+    document_max_concurrency: int = 2
 
     @classmethod
     def from_env(
@@ -81,4 +83,9 @@ class IngestionSettings:
             embedding_batch_size=_integer("EMBEDDING_BATCH_SIZE", 32),
             llm_request_timeout_seconds=_integer("LLM_REQUEST_TIMEOUT_SECONDS", 120),
             semantic_flush_batch_size=_integer("SEMANTIC_FLUSH_BATCH_SIZE", 32),
+            semantic_page_max_concurrency=_integer(
+                "SEMANTIC_PAGE_MAX_CONCURRENCY",
+                3,
+            ),
+            document_max_concurrency=_integer("DOCUMENT_MAX_CONCURRENCY", 2),
         )

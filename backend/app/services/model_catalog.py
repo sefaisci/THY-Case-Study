@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,15 +19,19 @@ from ..schemas.model_catalog import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class ModelCatalogService:
     def __init__(self, settings: Settings, *, client: Any | None = None) -> None:
         self.settings = settings
         self._client = client
         self._cached: ModelCatalogResponse | None = None
         self._cached_monotonic = 0.0
+        self._refresh_lock = asyncio.Lock()
         self._capabilities = self._load_capabilities(settings.model_capabilities_path)
 
-    def get_catalog(self, *, force: bool = False) -> ModelCatalogResponse:
+    async def get_catalog(self, *, force: bool = False) -> ModelCatalogResponse:
         age = time.monotonic() - self._cached_monotonic
         if (
             not force
@@ -33,49 +39,69 @@ class ModelCatalogService:
             and age <= self.settings.openai_model_cache_seconds
         ):
             return self._cached
-        refreshed_at = datetime.now(timezone.utc).isoformat()
-        if not self.settings.openai_api_key and self._client is None:
-            catalog = ModelCatalogResponse(
-                provider_available=False,
-                error="OPENAI_API_KEY is not configured.",
-                refreshed_at=refreshed_at,
-            )
-        else:
-            try:
-                client = self._client or self._create_client()
-                response = client.models.list()
-                available_ids = {str(item.id) for item in response.data}
-                models = [
-                    AvailableModel(**self._catalog_fields(item))
-                    for item in self._capabilities
-                    if item["id"] in available_ids
-                ]
-                unavailable_models = [
-                    UnavailableModel(
-                        **self._catalog_fields(item),
-                        unavailable_reason=self._unavailable_reason(item),
-                    )
-                    for item in self._capabilities
-                    if item["id"] not in available_ids
-                ]
-                catalog = ModelCatalogResponse(
-                    provider_available=True,
-                    models=models,
-                    unavailable_models=unavailable_models,
-                    refreshed_at=refreshed_at,
-                )
-            except Exception as exc:
+        async with self._refresh_lock:
+            age = time.monotonic() - self._cached_monotonic
+            if (
+                not force
+                and self._cached is not None
+                and age <= self.settings.openai_model_cache_seconds
+            ):
+                return self._cached
+            refreshed_at = datetime.now(timezone.utc).isoformat()
+            if not self.settings.openai_api_key and self._client is None:
                 catalog = ModelCatalogResponse(
                     provider_available=False,
-                    error=f"OpenAI model availability check failed: {str(exc)[:500]}",
+                    error="OPENAI_API_KEY is not configured.",
                     refreshed_at=refreshed_at,
                 )
-        self._cached = catalog
-        self._cached_monotonic = time.monotonic()
-        return catalog
+            else:
+                client = self._client
+                owns_client = client is None
+                try:
+                    client = client or self._create_client()
+                    response = await client.models.list()
+                    available_ids = {str(item.id) for item in response.data}
+                    models = [
+                        AvailableModel(**self._catalog_fields(item))
+                        for item in self._capabilities
+                        if item["id"] in available_ids
+                    ]
+                    unavailable_models = [
+                        UnavailableModel(
+                            **self._catalog_fields(item),
+                            unavailable_reason=self._unavailable_reason(item),
+                        )
+                        for item in self._capabilities
+                        if item["id"] not in available_ids
+                    ]
+                    catalog = ModelCatalogResponse(
+                        provider_available=True,
+                        models=models,
+                        unavailable_models=unavailable_models,
+                        refreshed_at=refreshed_at,
+                    )
+                except Exception as exc:
+                    catalog = ModelCatalogResponse(
+                        provider_available=False,
+                        error=f"OpenAI model availability check failed: {str(exc)[:500]}",
+                        refreshed_at=refreshed_at,
+                    )
+                finally:
+                    if owns_client and client is not None:
+                        try:
+                            await client.close()
+                        except Exception:
+                            logger.warning(
+                                "Failed to close the factory-owned OpenAI model catalog client.",
+                                exc_info=True,
+                                extra={"event": "model_catalog_client_close_failed"},
+                            )
+            self._cached = catalog
+            self._cached_monotonic = time.monotonic()
+            return catalog
 
-    def validate(self, model: str, reasoning_effort: str) -> None:
-        catalog = self.get_catalog()
+    async def validate(self, model: str, reasoning_effort: str) -> None:
+        catalog = await self.get_catalog()
         if not catalog.provider_available:
             raise ProviderError(catalog.error or "OpenAI model availability is unavailable.")
         selected = next((item for item in catalog.models if item.id == model), None)
@@ -93,9 +119,9 @@ class ModelCatalogService:
             )
 
     def _create_client(self) -> Any:
-        from openai import OpenAI
+        from openai import AsyncOpenAI
 
-        return OpenAI(
+        return AsyncOpenAI(
             api_key=self.settings.openai_api_key,
             base_url=self.settings.openai_base_url,
         )

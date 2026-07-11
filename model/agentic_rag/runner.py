@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from .adapters import RagAdapters, create_fake_adapters
 from .graphs import build_rag_graph
 from .schemas import CollectionScope, ConversationTurn, RagRequest, RagResponse, RagState
 from .settings import RagSettings
 
 
-def run_rag_question(
+async def run_rag_question(
     question: str,
     user_id: str = "local-demo-user",
     *,
@@ -19,7 +21,7 @@ def run_rag_question(
     collection_scope: CollectionScope = "both",
     conversation_history: list[ConversationTurn] | None = None,
 ) -> RagResponse:
-    """Run one RAG question through the LangGraph workflow."""
+    """Run one RAG question asynchronously through the LangGraph workflow."""
 
     settings = settings or RagSettings.from_env()
     adapters = adapters or create_fake_adapters(settings)
@@ -44,7 +46,7 @@ def run_rag_question(
         "errors": [],
     }
     config = {"configurable": {"thread_id": thread_id or "notebook-thread", "user_id": user_id}}
-    final_state = graph.invoke(initial_state, config=config)
+    final_state = await graph.ainvoke(initial_state, config=config)
     response = final_state.get("response")
     if response is not None:
         return response
@@ -56,4 +58,21 @@ def run_rag_question(
         citation_validation=final_state.get("citation_validation"),
         reflection=final_state.get("reflection"),
         errors=final_state.get("errors", []),
+    )
+
+
+def run_rag_question_sync(*args, **kwargs) -> RagResponse:
+    """Notebook-only synchronous wrapper around :func:`run_rag_question`.
+
+    Application and backend code must await ``run_rag_question`` directly. This
+    wrapper intentionally refuses to run inside an active event loop.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run_rag_question(*args, **kwargs))
+    raise RuntimeError(
+        "run_rag_question_sync is notebook-only and cannot run inside an active "
+        "event loop; await run_rag_question instead."
     )

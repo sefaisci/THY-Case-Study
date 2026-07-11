@@ -26,7 +26,7 @@ async def list_documents(
     session: DatabaseSession,
     settings: ApplicationSettings,
 ) -> list[DocumentResponse]:
-    return DocumentService(session, settings).list_documents(user.id)
+    return await DocumentService(session, settings).list_documents(user.id)
 
 
 @router.post(
@@ -53,7 +53,7 @@ async def upload_documents(
         settings,
         model_catalog=model_catalog,
     )
-    documents = service.upload_many(
+    documents = await service.upload_many(
         user_id=user.id,
         files=files,
         ingestion_method=ingestion_method,
@@ -77,7 +77,7 @@ async def delete_document(
     session: DatabaseSession,
     settings: ApplicationSettings,
 ) -> DocumentDeleteResponse:
-    return DocumentService(session, settings).delete(
+    return await DocumentService(session, settings).delete(
         user_id=user.id,
         document_id=document_id,
     )

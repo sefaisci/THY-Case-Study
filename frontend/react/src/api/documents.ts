@@ -38,6 +38,7 @@ export function uploadDocuments(options: {
     username: options.username,
     body: formData,
     signal: options.signal,
+    timeoutMs: 300_000,
   });
 }
 
@@ -52,6 +53,7 @@ export function deleteDocument(
       method: "DELETE",
       username,
       signal,
+      timeoutMs: 120_000,
     },
   );
 }

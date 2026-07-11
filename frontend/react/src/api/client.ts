@@ -10,6 +10,7 @@ export interface ApiRequestOptions extends Omit<RequestInit, "body"> {
   username?: string;
   query?: Record<string, QueryValue>;
   baseUrl?: string;
+  timeoutMs?: number;
 }
 
 export class ApiError extends Error {
@@ -32,6 +33,13 @@ export class ApiError extends Error {
     this.status = options.status ?? null;
     this.requestId = options.requestId;
     this.details = options.details ?? {};
+  }
+}
+
+class RequestTimeoutError extends Error {
+  constructor() {
+    super("The request timed out.");
+    this.name = "RequestTimeoutError";
   }
 }
 
@@ -95,6 +103,18 @@ function isErrorResponse(value: unknown): value is ErrorResponse {
   );
 }
 
+function canPassSignalToFetch(signal: AbortSignal): boolean {
+  try {
+    // Node-based browser test runners can expose a DOM AbortSignal that is not
+    // accepted by their native fetch implementation. Real browsers accept this
+    // probe, allowing timeout cancellation without weakening test portability.
+    new Request(window.location.origin, { signal });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function apiRequest<T>(
   path: string,
   options: ApiRequestOptions = {},
@@ -105,6 +125,8 @@ export async function apiRequest<T>(
     username,
     query,
     baseUrl = getApiBaseUrl(),
+    timeoutMs = 30_000,
+    signal: callerSignal,
     headers: initialHeaders,
     ...requestInit
   } = options;
@@ -116,24 +138,65 @@ export async function apiRequest<T>(
     headers.set("Content-Type", JSON_CONTENT_TYPE);
   }
 
-  let response: Response;
+  let timeout: number | undefined;
+  let timedOut = false;
+  let relayCallerAbort: (() => void) | undefined;
+  const timeoutController = new AbortController();
+  const cancellableTimeout = canPassSignalToFetch(timeoutController.signal);
+  let requestSignal = callerSignal;
+  if (cancellableTimeout) {
+    requestSignal = timeoutController.signal;
+    relayCallerAbort = () => timeoutController.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) {
+      relayCallerAbort();
+    } else {
+      callerSignal?.addEventListener("abort", relayCallerAbort, { once: true });
+    }
+  }
+  let result: { response: Response; payload: unknown };
   try {
-    response = await fetch(buildUrl(path, query, baseUrl), {
-      ...requestInit,
-      body,
-      headers,
-    });
+    result = await Promise.race([
+      fetch(buildUrl(path, query, baseUrl), {
+          ...requestInit,
+          body,
+          headers,
+          signal: requestSignal,
+        }).then(async (response) => ({
+          response,
+          payload: await parseJson(response),
+        })),
+      new Promise<never>((_, reject) => {
+        timeout = window.setTimeout(() => {
+          timedOut = true;
+          if (cancellableTimeout) timeoutController.abort();
+          reject(new RequestTimeoutError());
+        }, timeoutMs);
+      }),
+    ]);
   } catch (cause) {
-    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    if (callerSignal?.aborted) throw cause;
+    if (cause instanceof RequestTimeoutError || timedOut) {
+      throw new ApiError({
+        message: "The request timed out before the backend completed the operation.",
+        code: "request_timeout",
+        requestId,
+        cause,
+      });
+    }
     throw new ApiError({
       message: "The FastAPI backend is unavailable. Verify that it is running and reachable.",
       code: "backend_unavailable",
       requestId,
       cause,
     });
+  } finally {
+    if (timeout !== undefined) window.clearTimeout(timeout);
+    if (relayCallerAbort) {
+      callerSignal?.removeEventListener("abort", relayCallerAbort);
+    }
   }
 
-  const payload = await parseJson(response);
+  const { response, payload } = result;
   if (response.ok) return payload as T;
 
   const responseRequestId = response.headers.get("X-Request-ID");

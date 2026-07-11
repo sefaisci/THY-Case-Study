@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from typing import Any
@@ -50,9 +51,9 @@ class OpenAISemanticChunker:
         if not api_key and client is None:
             raise ValueError("OPENAI_API_KEY is required for semantic image chunking.")
         if client is None:
-            from openai import OpenAI
+            from openai import AsyncOpenAI
 
-            client = OpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._client = client
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -60,13 +61,18 @@ class OpenAISemanticChunker:
         self.max_retries = max_retries
         self.usage_callback = usage_callback
 
-    def chunk_page(self, page: RenderedPage) -> SemanticPageResult:
+    async def chunk_page(self, page: RenderedPage) -> SemanticPageResult:
         """Return a strict semantic result or one bounded terminal error."""
 
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = self._client.responses.parse(
+                image_url = await asyncio.to_thread(
+                    image_to_data_url,
+                    page.image_path,
+                    page.mime_type,
+                )
+                response = await self._client.responses.parse(
                     model=self.model,
                     reasoning={"effort": self.reasoning_effort},
                     instructions=SEMANTIC_SYSTEM_PROMPT,
@@ -80,7 +86,7 @@ class OpenAISemanticChunker:
                                 },
                                 {
                                     "type": "input_image",
-                                    "image_url": image_to_data_url(page.image_path, page.mime_type),
+                                    "image_url": image_url,
                                 },
                             ],
                         }

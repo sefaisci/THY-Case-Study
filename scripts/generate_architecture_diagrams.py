@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import shutil
 import subprocess
 import sys
@@ -22,24 +23,162 @@ from model.agentic_rag.settings import RagSettings
 ARCHITECTURE_DIR = PROJECT_ROOT / "docs" / "architecture"
 
 
+LANGGRAPH_NODE_LABELS = {
+    "__start__": "START",
+    "query_understanding": "Understand + rewrite query\nBuild exactly 5 variants",
+    "retrieval_subgraph:retrieval_planner": "Plan retrieval scope",
+    "retrieval_subgraph:retrieve_variant": "Retrieve one query variant\n5 dynamic Send workers",
+    "retrieval_subgraph:fuse_variant_results": "Fuse variant results\nDeterministic weighted RRF",
+    "retrieval_subgraph:reranking": "Rerank evidence",
+    "answer_subgraph:answer_generation": "Generate grounded answer",
+    "answer_subgraph:citation_validation": "Validate exact chunk citations",
+    "answer_subgraph:claim_evidence_reflection": "Evaluate claim grounding",
+    "conversation_generation": "Generate conversational fallback\nActive-session history only",
+    "final_response": "Build typed final response",
+    "__end__": "END",
+}
+
+# LangGraph intentionally omits branch names from the expanded drawable graph
+# when conditional functions return node names. Keeping the route descriptions
+# here makes the public image self-explanatory; _assert_langgraph_shape below
+# prevents these annotations from silently drifting away from executable code.
+LANGGRAPH_EDGE_LABELS: dict[tuple[str, str], str | None] = {
+    ("__start__", "query_understanding"): None,
+    ("query_understanding", "retrieval_subgraph:retrieval_planner"): (
+        "document retrieval"
+    ),
+    ("query_understanding", "conversation_generation"): (
+        "history request / no documents"
+    ),
+    (
+        "retrieval_subgraph:retrieval_planner",
+        "retrieval_subgraph:retrieve_variant",
+    ): "Send x5 query variants",
+    (
+        "retrieval_subgraph:retrieve_variant",
+        "retrieval_subgraph:fuse_variant_results",
+    ): "fan-in",
+    (
+        "retrieval_subgraph:fuse_variant_results",
+        "retrieval_subgraph:reranking",
+    ): None,
+    (
+        "retrieval_subgraph:reranking",
+        "answer_subgraph:answer_generation",
+    ): "sufficient evidence",
+    ("retrieval_subgraph:reranking", "conversation_generation"): (
+        "insufficient evidence"
+    ),
+    (
+        "answer_subgraph:answer_generation",
+        "answer_subgraph:citation_validation",
+    ): None,
+    (
+        "answer_subgraph:citation_validation",
+        "answer_subgraph:claim_evidence_reflection",
+    ): None,
+    (
+        "answer_subgraph:claim_evidence_reflection",
+        "final_response",
+    ): "accepted + grounded",
+    (
+        "answer_subgraph:claim_evidence_reflection",
+        "conversation_generation",
+    ): "rejected / no-answer",
+    ("conversation_generation", "final_response"): None,
+    ("final_response", "__end__"): None,
+}
+
+LANGGRAPH_CONDITIONAL_EDGES = {
+    ("query_understanding", "retrieval_subgraph:retrieval_planner"),
+    ("query_understanding", "conversation_generation"),
+    (
+        "retrieval_subgraph:retrieval_planner",
+        "retrieval_subgraph:retrieve_variant",
+    ),
+    (
+        "retrieval_subgraph:reranking",
+        "answer_subgraph:answer_generation",
+    ),
+    ("retrieval_subgraph:reranking", "conversation_generation"),
+    (
+        "answer_subgraph:claim_evidence_reflection",
+        "final_response",
+    ),
+    (
+        "answer_subgraph:claim_evidence_reflection",
+        "conversation_generation",
+    ),
+}
+
+
 class BrandPngDrawer(PngDrawer):
     """Render a LangGraph graph locally with restrained THY-inspired styling."""
 
+    def get_node_label(self, label: str) -> str:
+        """Return a safe multiline Graphviz HTML label."""
+
+        label = self.labels.get("nodes", {}).get(label, label)
+        lines = "<BR/>".join(html.escape(line) for line in label.splitlines())
+        return f"<<B>{lines}</B>>"
+
+    def get_edge_label(self, label: str) -> str:
+        """Return a safe route label without hyperlink-like underlining."""
+
+        label = self.labels.get("edges", {}).get(label, label)
+        return f"<{html.escape(label)}>"
+
     def add_node(self, viz: Any, node: str) -> None:
         """Add one labeled graph node using the public repository palette."""
+
+        fillcolor = "#FFFFFF"
+        color = "#C8102E"
+        if node.startswith("retrieval_subgraph:"):
+            fillcolor = "#FFF7F7"
+        elif node.startswith("answer_subgraph:"):
+            fillcolor = "#F7FAFC"
+            color = "#475569"
+        elif node == "conversation_generation":
+            fillcolor = "#FFF8E7"
+            color = "#B45309"
 
         viz.add_node(
             node,
             label=self.get_node_label(node),
             shape="box",
             style="rounded,filled",
-            fillcolor="#FFF7F7",
-            color="#C8102E",
+            fillcolor=fillcolor,
+            color=color,
             fontcolor="#14213D",
             penwidth=1.4,
-            fontsize=12,
+            fontsize=11,
             fontname=self.fontname,
             margin="0.16,0.10",
+            group="fallback" if node == "conversation_generation" else "primary",
+        )
+
+    def add_edge(
+        self,
+        viz: Any,
+        source: str,
+        target: str,
+        label: str | None = None,
+        conditional: bool = False,
+    ) -> None:
+        """Render direct and conditional transitions with documented route names."""
+
+        route_label = LANGGRAPH_EDGE_LABELS.get((source, target), label)
+        viz.add_edge(
+            source,
+            target,
+            label=self.get_edge_label(route_label) if route_label else "",
+            color="#C8102E" if conditional else "#64748B",
+            fontcolor="#475569",
+            fontsize=9,
+            fontname=self.fontname,
+            penwidth=1.2,
+            arrowsize=0.7,
+            style="dashed" if conditional else "solid",
         )
 
     @staticmethod
@@ -61,12 +200,24 @@ class BrandPngDrawer(PngDrawer):
         viz = pgv.AGraph(
             directed=True,
             strict=False,
-            rankdir="LR",
+            rankdir="TB",
             bgcolor="white",
-            nodesep=0.45,
-            ranksep=0.7,
-            pad=0.25,
-            splines="spline",
+            nodesep=0.42,
+            ranksep=0.72,
+            pad=0.3,
+            dpi=160,
+            newrank=True,
+            compound=True,
+            splines="polyline",
+            label=(
+                "THY Cabin Knowledge Assistant\n"
+                "LangGraph Agentic RAG - expanded executable graph"
+            ),
+            labelloc="t",
+            labeljust="c",
+            fontname=self.fontname,
+            fontcolor="#14213D",
+            fontsize=18,
         )
         self.add_nodes(viz, graph)
         self.add_edges(viz, graph)
@@ -78,8 +229,11 @@ class BrandPngDrawer(PngDrawer):
                 color="#CBD5E1",
                 fontcolor="#475569",
                 fontname=self.fontname,
+                fontsize=10,
+                labeljust="l",
                 style="rounded",
                 penwidth=1.0,
+                margin=16,
             )
         self.update_styles(viz, graph)
         try:
@@ -96,7 +250,7 @@ digraph thy_agentic_rag_system {
     bgcolor="white",
     fontname="Helvetica",
     fontsize=22,
-    label="THY-Branded Agentic RAG — Complete System Architecture",
+    label="THY-Branded Agentic RAG — Fully Asynchronous System Architecture",
     labelloc="t",
     labeljust="l",
     pad=0.35,
@@ -130,22 +284,22 @@ digraph thy_agentic_rag_system {
     label="Frontend";
     color="#E2E8F0";
     style="rounded";
-    react [label="React 19 + TypeScript\nTailwind + TanStack Query + Zustand", fillcolor="#FFF5F5", color="#C8102E"];
-    nginx [label="Nginx\nStatic delivery + API proxy"];
+    react [label="React 19 + TypeScript\nTailwind + TanStack Query + Zustand\nAsync mutations + batch job polling", fillcolor="#FFF5F5", color="#C8102E"];
+    nginx [label="Nginx\nStatic delivery + async API proxy"];
     streamlit [label="Optional Streamlit\nCompatibility interface", style="rounded,dashed,filled", fillcolor="#F8FAFC"];
     react -> nginx;
   }
 
   subgraph cluster_backend {
-    label="FastAPI application";
+    label="Async FastAPI application";
     color="#E2E8F0";
     style="rounded";
-    api [label="REST API + OpenAPI\nPydantic v2 + request IDs", fillcolor="#F8FAFC"];
+    api [label="Async REST API + OpenAPI\nPydantic v2 + request IDs", fillcolor="#F8FAFC"];
     identity [label="Tenant boundary\nUsername → internal user UUID", fillcolor="#FFF5F5", color="#C8102E"];
-    document_service [label="Documents + ingestion\nValidation and lifecycle"];
-    chat_service [label="Chat sessions\nBounded short-term history"];
+    document_service [label="Documents + ingestion\nConcurrent jobs + one-active-job invariant\nCancellation-safe lifecycle"];
+    chat_service [label="Chat sessions\nPer-session ordered async turns\nBounded short-term history"];
     usage_service [label="Usage + pricing\nTokens, known cost, version"];
-    repositories [label="Owner-scoped repositories\nSQLAlchemy 2"];
+    repositories [label="Owner-scoped repositories\nAsync SQLAlchemy 2 + AsyncSession"];
     api -> identity;
     identity -> document_service;
     identity -> chat_service;
@@ -159,8 +313,8 @@ digraph thy_agentic_rag_system {
     label="Model and orchestration layer";
     color="#E2E8F0";
     style="rounded";
-    ingestion_pipeline [label="Multi-format ingestion\nPage-image rendering\nSemantic or Docling chunking", fillcolor="#FFF5F5", color="#C8102E"];
-    rag_graph [label="LangGraph Agentic RAG\nPlan → retrieve → rerank → answer\nValidate → reflect → finalize", fillcolor="#FFF5F5", color="#C8102E"];
+    ingestion_pipeline [label="Bounded async ingestion\nConcurrent documents + semantic pages\nSemantic or Docling chunking\nBatched embeddings + Qdrant upserts", fillcolor="#FFF5F5", color="#C8102E"];
+    rag_graph [label="Async LangGraph Agentic RAG\nGenerate exactly 5 query variants\nSend map → parallel retrieval → reducer\nRerank → answer → validate → reflect", fillcolor="#FFF5F5", color="#C8102E"];
     fallback [label="Conversational fallback\nActive-session history only"];
     rag_graph -> fallback [style=dashed];
   }
@@ -169,33 +323,64 @@ digraph thy_agentic_rag_system {
     label="Persistence";
     color="#E2E8F0";
     style="rounded";
-    postgres [label="PostgreSQL 16\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
+    postgres [label="PostgreSQL 16\nAsync driver, row locks, partial unique index\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
     uploads [label="Persistent volume\nSources + render artifacts", shape=folder, fillcolor="#F8FAFC"];
-    qdrant [label="External Qdrant\nsemantic_chunks\ndocling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
+    qdrant [label="External Qdrant\nAsyncQdrantClient\n5 parallel owner-scoped searches\nsemantic_chunks + docling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
   }
 
   subgraph cluster_provider {
     label="External model provider";
     color="#E2E8F0";
     style="rounded";
-    openai [label="OpenAI APIs\nResponses + embeddings", fillcolor="#F8FAFC"];
+    openai [label="OpenAI APIs via AsyncOpenAI\nResponses + embeddings", fillcolor="#F8FAFC"];
   }
 
   user -> react [label="HTTPS"];
   user -> streamlit [label="optional"];
-  nginx -> api [label="REST + X-Username"];
+  nginx -> api [label="async REST + X-Username"];
   streamlit -> api [label="REST + X-Username"];
-  document_service -> ingestion_pipeline [label="ingestion job"];
-  chat_service -> rag_graph [label="question + session history"];
-  repositories -> postgres [label="transactions"];
+  document_service -> ingestion_pipeline [label="bounded concurrent jobs"];
+  chat_service -> rag_graph [label="await question + session history"];
+  repositories -> postgres [label="await transactions"];
   document_service -> uploads [label="source files"];
-  ingestion_pipeline -> qdrant [label="owner-scoped chunks"];
-  ingestion_pipeline -> openai;
-  rag_graph -> qdrant [label="mandatory owner filter"];
-  rag_graph -> openai;
+  ingestion_pipeline -> qdrant [label="await batched owner-scoped upserts"];
+  ingestion_pipeline -> openai [label="await Responses + embeddings"];
+  rag_graph -> qdrant [label="5 parallel searches\nmandatory owner filter"];
+  rag_graph -> openai [label="await rewrite + answer"];
   usage_service -> openai [style=dashed];
 }
 """
+
+
+def _assert_langgraph_shape(graph: Any) -> None:
+    """Fail generation when the documented graph topology no longer matches code."""
+
+    actual_nodes = set(graph.nodes)
+    expected_nodes = set(LANGGRAPH_NODE_LABELS)
+    if actual_nodes != expected_nodes:
+        raise RuntimeError(
+            "LangGraph nodes changed; update diagram labels and README documentation. "
+            f"Missing labels: {sorted(actual_nodes - expected_nodes)}; "
+            f"stale labels: {sorted(expected_nodes - actual_nodes)}."
+        )
+
+    actual_edges = {(edge.source, edge.target) for edge in graph.edges}
+    expected_edges = set(LANGGRAPH_EDGE_LABELS)
+    if actual_edges != expected_edges:
+        raise RuntimeError(
+            "LangGraph edges changed; update route annotations and README documentation. "
+            f"Unannotated edges: {sorted(actual_edges - expected_edges)}; "
+            f"stale annotations: {sorted(expected_edges - actual_edges)}."
+        )
+
+    actual_conditional_edges = {
+        (edge.source, edge.target) for edge in graph.edges if edge.conditional
+    }
+    if actual_conditional_edges != LANGGRAPH_CONDITIONAL_EDGES:
+        raise RuntimeError(
+            "LangGraph conditional routing changed; update the diagram annotations. "
+            f"Actual: {sorted(actual_conditional_edges)}."
+        )
 
 
 def generate_langgraph_diagram() -> None:
@@ -203,6 +388,7 @@ def generate_langgraph_diagram() -> None:
 
     compiled_graph = build_rag_graph(settings=RagSettings())
     drawable_graph = compiled_graph.get_graph(xray=True)
+    _assert_langgraph_shape(drawable_graph)
     styles = NodeStyles(
         default=(
             "fill:#FFF5F5,stroke:#C8102E,stroke-width:1.5px,"
@@ -225,19 +411,7 @@ def generate_langgraph_diagram() -> None:
     BrandPngDrawer(
         fontname="DejaVu Sans",
         labels={
-            "nodes": {
-                "__start__": "START",
-                "query_understanding": "Understand query",
-                "retrieval_subgraph:retrieval_planner": "Plan retrieval",
-                "retrieval_subgraph:hybrid_retrieval": "Hybrid retrieval",
-                "retrieval_subgraph:reranking": "Rerank evidence",
-                "answer_subgraph:answer_generation": "Generate grounded answer",
-                "answer_subgraph:citation_validation": "Validate citations",
-                "answer_subgraph:claim_evidence_reflection": "Reflect on evidence",
-                "conversation_generation": "Conversational fallback",
-                "final_response": "Build final response",
-                "__end__": "END",
-            },
+            "nodes": LANGGRAPH_NODE_LABELS,
             "edges": {},
         },
     ).draw(drawable_graph, str(png_path))

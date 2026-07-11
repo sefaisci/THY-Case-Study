@@ -16,17 +16,20 @@ from model.ingestion import (
 )
 
 settings = IngestionSettings.from_env(".env", project_root=Path.cwd())
-coordinator = create_connected_ingestion_coordinator(settings)
+coordinator = await create_connected_ingestion_coordinator(settings)
 
-result = coordinator.run(
-    IngestionRequest(
-        method="semantic",  # or "docling"
-        user_id="local-demo-user",
-        pdf_path=Path("files/pdf"),
-        docx_path=Path("files/docx"),
-        pptx_path=Path("files/pptx"),
+try:
+    result = await coordinator.run(
+        IngestionRequest(
+            method="semantic",  # or "docling"
+            user_id="local-demo-user",
+            pdf_path=Path("files/pdf"),
+            docx_path=Path("files/docx"),
+            pptx_path=Path("files/pptx"),
+        )
     )
-)
+finally:
+    await coordinator.aclose()
 ```
 
 `semantic` renders every page or slide to an image and analyzes each location independently. It supplies no previous-page memory and returns one flat list of variable-length chunks; each chunk's authoritative `text` is embedded exactly as stored in `semantic_chunks`. `docling` parses the original source, creates page-scoped fixed token windows, and writes them to `docling_fixed_chunks`. Both paths use `text-embedding-3-small` and the same deterministic sparse encoder.
@@ -35,11 +38,12 @@ result = coordinator.run(
 
 ```text
 START
--> query_understanding (standalone + bilingual retrieval rewrite)
+-> query_understanding (exactly five typed search forms)
 -> conversation_generation, for explicit active-session history questions or users without completed documents
 -> retrieval_subgraph, otherwise
    -> retrieval_planner
-   -> hybrid_retrieval (active-document filter, dense + sparse, weighted Qdrant RRF)
+   -> Send(retrieve_variant) x5 (parallel async embeddings and user-scoped Qdrant searches)
+   -> fuse_variant_results (deterministic, idempotent fan-in)
    -> reranking
 -> conversation_generation, when evidence is empty or below threshold
 -> answer_subgraph, when evidence is sufficient
@@ -64,12 +68,15 @@ from model.agentic_rag import (
 
 settings = RagSettings.from_env(".env")
 adapters = create_openai_qdrant_adapters(settings)
-response = run_rag_question(
-    "What three parts of differential equations study are listed on page 1?",
-    user_id="local-demo-user",
-    adapters=adapters,
-    settings=settings,
-)
+try:
+    response = await run_rag_question(
+        "What three parts of differential equations study are listed on page 1?",
+        user_id="local-demo-user",
+        adapters=adapters,
+        settings=settings,
+    )
+finally:
+    await adapters.aclose()
 response.model_dump()
 ```
 

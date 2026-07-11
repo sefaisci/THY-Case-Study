@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -85,12 +86,23 @@ class Document(TimestampMixin, Base):
 
 class IngestionJob(TimestampMixin, Base):
     __tablename__ = "ingestion_jobs"
+    __table_args__ = (
+        Index(
+            "uq_ingestion_jobs_active_document",
+            "document_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'processing')"),
+            sqlite_where=text("status IN ('pending', 'processing')"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
     document_id: Mapped[str] = mapped_column(
         ForeignKey("documents.id", ondelete="CASCADE"), index=True, nullable=False
     )
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    total_pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processed_pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     point_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

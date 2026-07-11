@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -12,13 +13,13 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from qdrant_client import QdrantClient
+from qdrant_client import AsyncQdrantClient
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .api.router import api_router
 from .config import get_settings
-from .database import SessionLocal
+from .database import SessionLocal, engine
 from .exceptions import AppError
 from .logging_config import configure_logging
 
@@ -32,7 +33,10 @@ async def lifespan(app: FastAPI):
     del app
     for directory in (settings.upload_dir, settings.page_image_dir, settings.processing_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    yield
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 app = FastAPI(
@@ -162,22 +166,45 @@ async def health() -> dict[str, str]:
 @app.get("/ready", tags=["operations"], summary="Dependency-aware readiness check")
 async def ready() -> JSONResponse:
     checks: dict[str, dict[str, object]] = {}
-    database_ready = False
-    qdrant_ready = False
-    try:
-        with SessionLocal() as session:
-            session.execute(text("SELECT 1"))
-        database_ready = True
-        checks["postgresql"] = {"ready": True}
-    except Exception as exc:
-        checks["postgresql"] = {"ready": False, "error": str(exc)[:300]}
-    try:
-        qdrant = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-        qdrant.get_collections()
-        qdrant_ready = True
-        checks["qdrant"] = {"ready": True}
-    except Exception as exc:
-        checks["qdrant"] = {"ready": False, "error": str(exc)[:300]}
+
+    async def check_database() -> Exception | None:
+        try:
+            async with SessionLocal() as session:
+                await session.execute(text("SELECT 1"))
+            return None
+        except Exception as exc:  # pragma: no cover - dependency failure path
+            return exc
+
+    async def check_qdrant() -> Exception | None:
+        qdrant = AsyncQdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=5,
+        )
+        try:
+            await qdrant.get_collections()
+            return None
+        except Exception as exc:  # pragma: no cover - dependency failure path
+            return exc
+        finally:
+            await qdrant.close()
+
+    database_result, qdrant_result = await asyncio.gather(
+        check_database(),
+        check_qdrant(),
+    )
+    database_ready = database_result is None
+    qdrant_ready = qdrant_result is None
+    checks["postgresql"] = (
+        {"ready": True}
+        if database_ready
+        else {"ready": False, "error": str(database_result)[:300]}
+    )
+    checks["qdrant"] = (
+        {"ready": True}
+        if qdrant_ready
+        else {"ready": False, "error": str(qdrant_result)[:300]}
+    )
     checks["openai"] = {"ready": bool(settings.openai_api_key), "mode": "key_configured"}
     ready_state = database_ready and qdrant_ready and bool(settings.openai_api_key)
     return JSONResponse(

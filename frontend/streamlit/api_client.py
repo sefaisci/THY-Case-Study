@@ -84,6 +84,15 @@ class ApiClient:
             username=username,
         )
 
+    def get_ingestion_jobs(self, username: str, job_ids: list[str]) -> list[dict[str, Any]]:
+        response = self._request(
+            "POST",
+            "/api/v1/ingestion-jobs/status",
+            username=username,
+            json={"job_ids": job_ids},
+        )
+        return list(response.get("jobs", []))
+
     def delete_document(self, username: str, document_id: str) -> dict[str, Any]:
         return self._request(
             "DELETE",

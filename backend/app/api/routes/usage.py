@@ -19,18 +19,18 @@ async def get_usage(
     session_id: str | None = Query(default=None),
     message_id: str | None = Query(default=None),
 ) -> UsageSummaryResponse:
-    if session_id and ChatRepository(session).get_owned(user.id, session_id) is None:
+    if session_id and await ChatRepository(session).get_owned(user.id, session_id) is None:
         raise NotFoundError("Chat session not found.", code="chat_session_not_found")
     repository = UsageRepository(session)
     service = UsageService(session, PricingRegistry(settings.pricing_registry_path))
-    total_records = repository.list_for_user(user.id, limit=10_000)
+    total_records = await repository.list_for_user(user.id, limit=10_000)
     session_records = (
-        repository.list_for_user(user.id, session_id=session_id, limit=10_000)
+        await repository.list_for_user(user.id, session_id=session_id, limit=10_000)
         if session_id
         else []
     )
     request_records = (
-        repository.list_for_user(user.id, message_id=message_id, limit=1_000)
+        await repository.list_for_user(user.id, message_id=message_id, limit=1_000)
         if message_id
         else []
     )

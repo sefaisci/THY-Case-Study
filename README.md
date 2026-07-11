@@ -22,9 +22,9 @@
 
 ## Overview
 
-Cabin Knowledge Assistant turns private PDF, DOCX, and PPTX files into a user-isolated knowledge base. It combines a professional React application, a typed FastAPI boundary, PostgreSQL metadata and chat persistence, an external Qdrant cluster, OpenAI Responses and Embeddings APIs, Docling, and a modular LangGraph workflow.
+Cabin Knowledge Assistant turns private PDF, DOCX, and PPTX files into a user-isolated knowledge base. It combines a professional React application, an asynchronous typed FastAPI boundary, async SQLAlchemy persistence, an external Qdrant cluster, OpenAI Responses and Embeddings APIs, Docling, and an asynchronous modular LangGraph workflow.
 
-The system supports two ingestion strategies, deterministic cross-collection retrieval, actual source citations, session-scoped conversational memory, provider token accounting, versioned USD pricing, and retryable document deletion. React is the primary interface; the earlier Streamlit application remains available through an optional Compose profile.
+The system supports two ingestion strategies, bounded concurrent multi-document processing, five-way parallel query retrieval, deterministic cross-collection fusion, actual source citations, session-scoped conversational memory, provider token accounting, versioned USD pricing, and retryable document deletion. React is the primary interface; the earlier Streamlit application remains available through an optional Compose profile.
 
 > [!IMPORTANT]
 > This repository is a proof of concept. Username-based identity demonstrates tenant scoping but is not authentication. Add enterprise identity, authorization, rate limiting, malware scanning, and durable background workers before production use.
@@ -33,14 +33,15 @@ The system supports two ingestion strategies, deterministic cross-collection ret
 
 | Capability | Implementation |
 | --- | --- |
-| Multi-format ingestion | Multiple PDF, DOCX, and PPTX uploads with backend extension, MIME, size, and SHA-256 duplicate validation |
+| Multi-format ingestion | Multiple PDF, DOCX, and PPTX uploads with backend validation and bounded asynchronous document/page processing |
 | Two chunking paths | Variable-length semantic page chunks or Docling fixed token windows |
 | Private retrieval | Mandatory backend-resolved `user_id` and completed-document filters on every Qdrant query |
-| Agentic RAG | Query understanding, planning, hybrid retrieval, reranking, grounded answer generation, citation validation, and reflection |
+| Agentic RAG | Exactly five faithful query variants, LangGraph `Send` map branches, parallel Qdrant retrieval, deterministic reduction, reranking, grounding, citation validation, and reflection |
 | Conversational continuity | Citation-free fallback using only the active PostgreSQL chat session when useful document evidence is unavailable |
 | Traceable answers | Actual filename, location, excerpt, score, ingestion method, collection, and chunk metadata |
 | Usage observability | Input, cached input, output, reasoning tokens, known USD cost, model snapshot, and pricing registry version |
 | Safe deletion | Retryable PostgreSQL state, owner-filtered deletion from both Qdrant collections, then physical file removal |
+| Async application stack | AsyncOpenAI, AsyncQdrantClient, SQLAlchemy AsyncSession, async FastAPI services, and non-blocking React request orchestration |
 | Portable operation | Docker Compose for PostgreSQL, FastAPI, and React; external Qdrant remains environment-configured |
 
 ## Complete system architecture
@@ -56,15 +57,61 @@ The editable Graphviz source and rendered PNG are stored beside the SVG in [`doc
 ## LangGraph Agentic RAG architecture
 
 <p align="center">
-  <img src="docs/architecture/langgraph-agentic-rag.png" alt="Expanded LangGraph Agentic RAG workflow" width="100%" />
+  <img src="docs/architecture/langgraph-agentic-rag.png" alt="Expanded executable LangGraph Agentic RAG workflow with retrieval and answer subgraphs" width="100%" />
 </p>
 
-This image is generated from the maintained compiled graph, not from a manually duplicated flowchart. The generator calls `build_rag_graph()`, expands nested subgraphs with `get_graph(xray=True)`, saves LangGraph's Mermaid representation, and uses LangGraph's local PNG drawing path to save the branded image. No project architecture is sent to an external diagram-rendering service.
+The full-resolution, slide-ready image remains available separately as [`docs/architecture/langgraph-agentic-rag.png`](docs/architecture/langgraph-agentic-rag.png).
 
-The graph has two terminal response paths:
+The committed PNG is generated from the executable graph rather than a separately maintained flowchart. [`generate_architecture_diagrams.py`](scripts/generate_architecture_diagrams.py) compiles `build_rag_graph()`, expands both compiled subgraphs through `get_graph(xray=True)`, verifies the node, edge, and conditional-edge sets, saves LangGraph's Mermaid representation, and renders the branded slide-ready PNG locally. Generation fails if the executable topology changes without corresponding labels and documentation; no graph definition or source content is sent to an external rendering service.
 
-1. Relevant evidence moves through grounded answer generation, exact chunk-ID citation validation, and claim-evidence reflection.
-2. Conversational requests, empty retrieval, below-threshold evidence, or rejected grounding move through a citation-free fallback that sees only the active session history.
+In this implementation, **agent** means the parent `thy_agentic_rag_graph`; **subagent** means one of its two compiled, typed subgraphs. The remaining named components are executable LangGraph nodes or conditional routing functions, not hidden autonomous agents.
+
+| Architecture level | Component | Responsibility |
+| --- | --- | --- |
+| Parent agent | `thy_agentic_rag_graph` | Owns the turn lifecycle, conditional routing, conversational recovery, final typed response, and optional checkpoint integration. |
+| Retrieval subagent | `retrieval_subgraph` | Plans collection scope, fans exactly five query variants into asynchronous map workers, deterministically reduces their results, and reranks the evidence. |
+| Answer subagent | `answer_subgraph` | Produces an evidence-only draft, deterministically validates exact chunk citations, and performs structured claim-level grounding reflection. |
+
+### Complete node and router catalog
+
+| Scope | Executable component | What it does |
+| --- | --- | --- |
+| Parent | `START` | LangGraph entry boundary for a typed `RagState`. |
+| Parent | `query_understanding` | Normalizes the question, classifies coarse intent, resolves referential follow-ups from bounded active-session history, and builds exactly five distinct variants: verbatim, standalone, English, keyword-focused, and source-style. The optional query-rewriter adapter is used when documents are available; a deterministic fallback preserves the five-variant contract. |
+| Parent router | `route_after_query_understanding` | Sends explicit conversation-history requests or users with no retrievable documents directly to conversational generation; all other turns enter the retrieval subgraph. |
+| Retrieval | `retrieval_planner` | Selects semantic chunks, Docling fixed chunks, or both from the explicit collection scope and records top-k, rerank, and hybrid-scoring settings in a typed `RetrievalPlan`. |
+| Retrieval router | `dispatch_query_variants` | Emits one LangGraph `Send` task per typed query variant. It is an edge function, so the diagram represents it as the conditional `Send x5` transition rather than an extra node box. |
+| Retrieval | `retrieve_variant` | Runs once for each of the five dynamic map tasks. Each worker asynchronously embeds its variant and queries all selected Qdrant collections concurrently with mandatory owner and completed-document filters. Branch failures are captured as typed node errors instead of corrupting successful branches. |
+| Retrieval | `fuse_variant_results` | Fans results back in, deduplicates them, preserves the strongest raw provider score, and applies deterministic weighted reciprocal-rank fusion. The state reducer is associative, commutative, and idempotent, so provider completion order cannot change the business ordering. |
+| Retrieval | `reranking` | Reranks fused candidates while retaining citation metadata and calculates whether the raw evidence score satisfies the configured answer threshold. It safely retains the fused ranking if the replaceable reranker fails. |
+| Parent router | `route_after_retrieval` | Sends sufficient evidence into the answer subgraph; empty or below-threshold evidence is prohibited from entering grounded generation and moves to citation-free conversational recovery. |
+| Answer | `answer_generation` | Gives the answer model only the selected evidence and requires exact internal chunk-ID markers. If evidence is below threshold or generation fails, it sets the grounded path to no-answer. Active-session history can clarify the question but is explicitly not document evidence. |
+| Answer | `citation_validation` | Deterministically extracts exact chunk markers and rejects missing valid citations, unknown IDs, cross-user IDs, and chunks below the citation threshold. Only explicitly cited, owner-matching evidence becomes public citation metadata. |
+| Answer | `claim_evidence_reflection` | Uses the structured grounding evaluator to check each claim against the cited full chunk text. Unsupported claims, missing citations, high hallucination risk, invalid evaluator IDs, or evaluator failure all fail closed. |
+| Parent router | `route_after_answer` | Accepts only a non-no-answer draft with valid citations and grounded reflection. A rejected draft loses document citations and moves to conversational recovery. |
+| Parent | `conversation_generation` | Produces a citation-free response using only bounded history from the active chat. It handles chat-history questions and safely recovers from absent, insufficient, or rejected document evidence without presenting session text as document truth. Empty or failed fallback generation becomes an explicit no-answer. |
+| Parent | `final_response` | Builds the typed `RagResponse`. Accepted grounded answers receive compact public citation markers; conversational answers have no citations; unsafe or empty results return the explicit no-answer response. |
+| Parent | `END` | LangGraph terminal boundary after the typed response is available. |
+
+### Grounding, ownership, and extension invariants
+
+- **Ownership is enforced before generation.** The backend resolves the current user, passes only that user's completed document IDs into `RagSettings`, and the Qdrant adapter applies both `user_id` and allowed-document filters to every dense and sparse prefetch. Retrieved payloads are checked again before chunks can reach reranking or prompts.
+- **Grounded generation is evidence-only.** Retrieved chunks are the only factual document context. Conversation history is role-preserving, session-scoped clarification context and is never treated or cited as source evidence.
+- **Insufficient evidence cannot become a grounded answer.** It bypasses the answer subgraph. Conversational recovery may answer only from active-session context and never fabricates document claims or citations; if it cannot produce a safe response, `final_response` emits the explicit no-answer result.
+- **Citation validation and reflection are first-class stages.** Deterministic chunk-ID and ownership checks run before the structured claim-evidence evaluator, and both must pass before a grounded response is released.
+- **Nodes are replaceable and extensible.** `RagNodeSet` binds graph nodes to protocol-based `RagAdapters`, so query rewriting, embeddings, retrieval, reranking, answer generation, and grounding evaluation can be replaced independently without changing the public runner or typed graph contract. New routing branches remain explicit in `graphs.py` and will force diagram regeneration checks to be updated.
+- **Concurrency is bounded by graph semantics.** LangGraph schedules the five `Send` workers independently; each worker awaits one embedding and concurrently searches the selected collections. Typed reducers provide a deterministic fan-in before reranking and generation.
+
+### Async design provenance
+
+The implementation applies four LangGraph patterns that were analyzed from local reference exports during development without adding those HTML exports to the public repository:
+
+- **Parallelization:** explicit fan-out/fan-in barriers and deterministic business ordering instead of relying on completion order.
+- **Subgraphs:** typed retrieval and answer subgraphs with clear input/state/output contracts.
+- **Map-reduce:** dynamic `Send` workers and an associative, commutative, idempotent result reducer.
+- **Research assistant:** nested asynchronous orchestration that separates query generation, source retrieval, evidence synthesis, and final response construction.
+
+These patterns keep provider I/O concurrent while preserving reproducible answers and owner-isolation invariants.
 
 ## Repository layout
 
@@ -103,26 +150,31 @@ Local tests, source documents, notebooks, generated page images, QA captures, pr
 
 1. FastAPI validates the upload and stores its source file under internal user and document identifiers.
 2. PDF pages render directly to images. DOCX and PPTX files convert through LibreOffice before every page or slide renders to an image.
-3. Each page is analyzed independently with the selected OpenAI Responses model and reasoning effort.
+3. Each page is analyzed independently with AsyncOpenAI and the selected Responses model/reasoning effort. Bounded page batches limit concurrent semantic analysis calls through `SEMANTIC_PAGE_MAX_CONCURRENCY`.
 4. No previous-page summary, dictionary memory, continuation context, or earlier page image is added to the semantic prompt.
 5. Strict Pydantic output produces a flat list of variable-length semantic chunks; recursive and nested chunk structures are rejected.
 6. The authoritative chunk text is embedded and stored unchanged in `semantic_chunks`.
-7. Embeddings and Qdrant upserts use bounded batches controlled by `SEMANTIC_FLUSH_BATCH_SIZE`.
+7. Embeddings and Qdrant upserts are awaited through AsyncOpenAI and AsyncQdrantClient in bounded batches controlled by `SEMANTIC_FLUSH_BATCH_SIZE`.
 8. A retry first removes only the same backend-resolved `user_id` and `document_id` points from the target collection and fails closed if cleanup is unsuccessful.
+9. Document-first row locks and a PostgreSQL partial unique index enforce one active ingestion job per document and exclude deletion while a job is pending or processing.
+10. Multiple selected documents run concurrently within `INGESTION_JOB_CONCURRENCY`; model-level discovery runs document batches bounded by `DOCUMENT_MAX_CONCURRENCY`.
 
 ### Docling fixed ingestion
 
-Docling extracts supported documents, applies the configured token window and overlap, embeds the chunks, and writes only to `docling_fixed_chunks`. Semantic model and reasoning controls do not apply to this path.
+Docling extracts supported documents through a thread-offloaded blocking boundary, applies the configured token window and overlap, asynchronously embeds the chunks, and writes only to `docling_fixed_chunks`. LibreOffice conversion uses a cancellable asynchronous subprocess. Semantic model and reasoning controls do not apply to this path.
 
 ### Chat and retrieval
 
-1. PostgreSQL loads only the selected session's bounded message history.
-2. The graph normalizes the question and rewrites a retrieval query when appropriate.
-3. Retrieval targets the selected collection scope and applies mandatory owner and completed-document filters.
-4. Dense and sparse candidates are merged deterministically, then reranked.
-5. Grounded answers receive citations only for chunks actually cited by exact chunk ID.
-6. If useful evidence is unavailable, the same chat remains usable through normal conversational generation without fabricated citations.
-7. Messages persist in PostgreSQL; chat messages are never written to Qdrant.
+1. A per-session async turn lock preserves message order within one chat while different chat sessions continue concurrently.
+2. PostgreSQL loads only the selected session's bounded message history and releases its read transaction before provider I/O.
+3. The graph normalizes the question and produces exactly five distinct, faithful searchable text variations.
+4. LangGraph dispatches five `Send` workers. Each worker asynchronously embeds its query and searches Qdrant independently; selected collections are also queried concurrently.
+5. Every Qdrant call applies mandatory backend-resolved owner and completed-document filters.
+6. An idempotent reducer compares and deduplicates candidates across all variants, then applies deterministic weighted reciprocal-rank fusion while preserving raw retrieval scores for evidence thresholds.
+7. The fused candidates are reranked and only above-threshold evidence is injected into the answer prompt.
+8. Grounded answers receive citations only for chunks actually cited by exact chunk ID.
+9. If useful evidence is unavailable, the same chat remains usable through normal conversational generation without fabricated citations.
+10. Messages persist through async SQLAlchemy transactions; chat messages are never written to Qdrant.
 
 ## Persistence model
 
@@ -147,6 +199,7 @@ Docling extracts supported documents, applies the configured token window and ov
 | `POST` | `/api/v1/documents/upload` | Validate and store multiple source files |
 | `DELETE` | `/api/v1/documents/{document_id}` | Run owner-scoped, retryable deletion |
 | `POST` | `/api/v1/ingestion-jobs` | Start ingestion for uploaded documents |
+| `POST` | `/api/v1/ingestion-jobs/status` | Poll multiple owner-scoped jobs in one request |
 | `GET` | `/api/v1/ingestion-jobs/{job_id}` | Poll one owner-scoped job |
 | `GET` | `/api/v1/chat/sessions` | List the current user's chats |
 | `POST` | `/api/v1/chat/sessions` | Create a clean short-term memory context |
@@ -211,7 +264,7 @@ Linux:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y libreoffice-writer libreoffice-impress graphviz fontconfig fonts-dejavu-core fonts-liberation2
+sudo apt-get install -y build-essential pkg-config libreoffice-writer libreoffice-impress graphviz libgraphviz-dev fontconfig fonts-dejavu-core fonts-liberation2
 ```
 
 macOS:
@@ -292,11 +345,24 @@ POSTGRES_PASSWORD=local-dev-password
 | File processing | `UPLOAD_DIR`, `PAGE_IMAGE_DIR`, `PROCESSING_DIR`, `MAX_UPLOAD_SIZE_MB`, `DOC_CONVERSION_DPI`, `SOFFICE_BINARY` |
 | External Qdrant | `QDRANT_URL`, `QDRANT_API_KEY`, collection names, named vectors, and dense vector size |
 | OpenAI | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, model cache duration, embedding model, and request timeout |
-| Ingestion | Semantic batch size, embedding batch size, fixed chunk size, and fixed overlap |
+| Ingestion | `INGESTION_JOB_CONCURRENCY`, `DOCUMENT_MAX_CONCURRENCY`, `SEMANTIC_PAGE_MAX_CONCURRENCY`, semantic flush size, embedding batch size, fixed chunk size, and fixed overlap |
 | Retrieval | Top-k values, hybrid weights, reranker, score thresholds, and session history limit |
 | Registries | `MODEL_CAPABILITIES_PATH`, `PRICING_REGISTRY_PATH` |
 
 Qdrant is intentionally not created by Compose. `QDRANT_URL` must be reachable from the backend container. A cloud HTTPS endpoint works directly; a Qdrant process on the Docker host can use `http://host.docker.internal:<port>`.
+
+### Concurrency controls
+
+The defaults favor predictable local-resource use and can be tuned independently:
+
+| Variable | Default | Boundary |
+| --- | ---: | --- |
+| `INGESTION_JOB_CONCURRENCY` | `4` | Maximum backend ingestion jobs executing simultaneously in one process; at the default, four selected files can run concurrently |
+| `DOCUMENT_MAX_CONCURRENCY` | `2` | Maximum discovered documents processed concurrently inside a model ingestion run |
+| `SEMANTIC_PAGE_MAX_CONCURRENCY` | `3` | Maximum page-image analysis requests in flight for one semantic document |
+| `SEMANTIC_FLUSH_BATCH_SIZE` | `32` | Maximum flat chunks accumulated before awaited embedding/upsert flush |
+
+These are bounded application-level limits, not global distributed quotas. When multiple backend replicas are deployed, use a durable queue and shared rate-limit coordination.
 
 ## Model access and pricing
 
@@ -316,7 +382,7 @@ python -m pip install -r requirements-architecture.txt
 python scripts/generate_architecture_diagrams.py
 ```
 
-Linux may require `libgraphviz-dev`; macOS uses the Graphviz installation shown above. Generated assets:
+Linux requires the compiler toolchain, `pkg-config`, and `libgraphviz-dev` shown above; macOS uses the Graphviz installation shown above. Generated assets:
 
 - `docs/architecture/langgraph-agentic-rag.mmd`
 - `docs/architecture/langgraph-agentic-rag.png`
@@ -379,9 +445,11 @@ Connected ingestion and chat operations can incur provider charges.
 ## Proof-of-concept limitations
 
 - Username identity is not password authentication, SSO, or an authorization protocol.
-- FastAPI background tasks are not a durable distributed ingestion queue.
-- Chat responses are synchronous; token streaming and cancellation are not implemented.
+- FastAPI schedules ingestion as awaited async background coroutines, but in-process background tasks are not a durable distributed queue and do not survive a worker restart.
+- Chat execution is asynchronous internally and browser timeouts abort fetches, but HTTP responses are non-streaming; durable request idempotency and provider-side cancellation after a client disconnect are not yet guaranteed.
 - PostgreSQL reconstructs session context instead of using a distributed LangGraph checkpointer.
+- Concurrency limits are process-local; multiple backend replicas require shared queue and rate-limit coordination.
+- The optional Streamlit profile is a compatibility client; React is the primary asynchronous browser orchestration surface.
 - Existing Qdrant points are not automatically migrated when a chunk schema changes; reingest those documents.
 - Rendering artifacts require a production retention and cleanup policy.
 - DOCX pagination can vary when host fonts differ; the backend image installs repeatable DejaVu and Liberation fonts.

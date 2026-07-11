@@ -5,7 +5,7 @@ from __future__ import annotations
 import unicodedata
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..exceptions import AppError
 from ..repositories import UserRepository
@@ -13,7 +13,7 @@ from ..schemas.users import UserResponse
 
 
 class UserService:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repository = UserRepository(session)
 
@@ -36,18 +36,18 @@ class UserService:
             )
         return username
 
-    def resolve(self, raw_username: str) -> tuple[object, bool]:
+    async def resolve(self, raw_username: str) -> tuple[object, bool]:
         username = self.normalize_username(raw_username)
-        existing = self.repository.get_by_username(username)
+        existing = await self.repository.get_by_username(username)
         if existing is not None:
             return existing, False
         try:
-            user = self.repository.create(username)
-            self.session.commit()
+            user = await self.repository.create(username)
+            await self.session.commit()
             return user, True
         except IntegrityError:
-            self.session.rollback()
-            concurrent = self.repository.get_by_username(username)
+            await self.session.rollback()
+            concurrent = await self.repository.get_by_username(username)
             if concurrent is None:
                 raise
             return concurrent, False

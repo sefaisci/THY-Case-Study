@@ -1,13 +1,16 @@
 import { LoaderCircle, UserRound } from "lucide-react";
-import { useEffect, useRef } from "react";
-import ReactMarkdown from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
+import { lazy, Suspense, useEffect, useRef } from "react";
 
 import type { ChatMessageResponse } from "../../api/contracts";
 import { BrandMark } from "../../components/Brand";
 import { SourcesDisclosure } from "../citations/SourcesDisclosure";
 import { UsageDisclosure } from "../usage/UsageDisclosure";
 import type { TurnUsageByMessage } from "../workspace/types";
+
+const AssistantMarkdown = lazy(async () => {
+  const module = await import("./AssistantMarkdown");
+  return { default: module.AssistantMarkdown };
+});
 
 interface MessageTimelineProps {
   username: string;
@@ -75,9 +78,18 @@ export function MessageTimeline({
             </div>
             <div className="message__content">
               <span className="message__author">Cabin Knowledge Assistant</span>
-              <div className="assistant-markdown">
-                <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown>
-              </div>
+              <Suspense
+                fallback={
+                  <div
+                    className="assistant-markdown assistant-markdown--loading"
+                    aria-hidden="true"
+                  >
+                    {message.content}
+                  </div>
+                }
+              >
+                <AssistantMarkdown>{message.content}</AssistantMarkdown>
+              </Suspense>
               <SourcesDisclosure citations={message.citations} />
               <UsageDisclosure
                 username={username}
