@@ -9,6 +9,44 @@ type CopyStatus = "idle" | "copied" | "failed";
 
 const STATUS_RESET_DELAY_MS = 1_800;
 
+async function writeClipboardText(content: string): Promise<void> {
+  let clipboardFailure: unknown;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(content);
+      return;
+    } catch (error) {
+      clipboardFailure = error;
+    }
+  }
+
+  if (typeof document.execCommand !== "function") {
+    throw clipboardFailure instanceof Error
+      ? clipboardFailure
+      : new Error("Clipboard access is unavailable.");
+  }
+
+  const activeElement = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  const textarea = document.createElement("textarea");
+  textarea.value = content;
+  textarea.readOnly = true;
+  textarea.dataset.copyFallback = "true";
+  Object.assign(textarea.style, {
+    position: "fixed",
+    top: "-1000px",
+    left: "-1000px",
+    opacity: "0",
+  });
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  activeElement?.focus();
+  if (!copied) throw new Error("The browser rejected the copy operation.");
+}
+
 export function MessageActions({ content }: MessageActionsProps) {
   const [status, setStatus] = useState<CopyStatus>("idle");
   const resetTimerRef = useRef<number | null>(null);
@@ -23,7 +61,7 @@ export function MessageActions({ content }: MessageActionsProps) {
   async function copyAnswer() {
     if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current);
     try {
-      await navigator.clipboard.writeText(content);
+      await writeClipboardText(content);
       setStatus("copied");
     } catch {
       setStatus("failed");

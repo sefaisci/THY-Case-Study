@@ -796,6 +796,18 @@ textarea {
   padding-left: 1.4rem;
 }
 
+.assistant-markdown ul {
+  list-style: disc;
+}
+
+.assistant-markdown ol {
+  list-style: decimal;
+}
+
+.assistant-markdown ul ul {
+  list-style: circle;
+}
+
 .assistant-markdown li + li {
   margin-top: 0.28rem;
 }
