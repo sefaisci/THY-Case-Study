@@ -806,6 +806,20 @@ textarea {
   min-width: max-content;
 }
 
+.assistant-markdown .katex-error {
+  display: inline;
+  padding: 0.08rem 0.24rem;
+  color: var(--navy-700) !important;
+  background: #fff7ed;
+  border-bottom: 1px dotted #c2410c;
+  border-radius: 3px;
+  font-family: inherit;
+}
+
+.assistant-markdown .katex-display {
+  overscroll-behavior-inline: contain;
+}
+
 .chat-loading {
   display: flex;
   min-height: 260px;

@@ -70,9 +70,15 @@ function displayMathReplacement(source: string, startIndex: number, endIndex: nu
   const lineStart = source.lastIndexOf("\n", startIndex - 1) + 1;
   const nextLineBreak = source.indexOf("\n", endIndex + 2);
   const lineEnd = nextLineBreak === -1 ? source.length : nextLineBreak;
-  const beginsOwnLine = source.slice(lineStart, startIndex).trim().length === 0;
+  const linePrefix = source.slice(lineStart, startIndex);
+  const beginsOwnLine = linePrefix.trim().length === 0;
   const endsOwnLine = source.slice(endIndex + 2, lineEnd).trim().length === 0;
-  const rendered = `$$\n${content}\n$$`;
+  const indentation = beginsOwnLine ? linePrefix : "";
+  const indentedContent = content
+    .split(/\r?\n/)
+    .map((line) => `${indentation}${line}`)
+    .join("\n");
+  const rendered = `$$\n${indentedContent}\n${indentation}$$`;
 
   return beginsOwnLine && endsOwnLine ? rendered : `\n\n${rendered}\n\n`;
 }
