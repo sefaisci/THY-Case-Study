@@ -6,6 +6,7 @@ import { BrandMark } from "../../components/Brand";
 import { SourcesDisclosure } from "../citations/SourcesDisclosure";
 import { UsageDisclosure } from "../usage/UsageDisclosure";
 import type { TurnUsageByMessage } from "../workspace/types";
+import { MessageActions } from "./MessageActions";
 
 const AssistantMarkdown = lazy(async () => {
   const module = await import("./AssistantMarkdown");
@@ -97,6 +98,7 @@ export function MessageTimeline({
                 message={message}
                 turn={turnUsageByMessage[message.id]}
               />
+              <MessageActions content={message.content} />
             </div>
           </article>
         ),
