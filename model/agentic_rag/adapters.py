@@ -6,14 +6,18 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
+import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from model.vector_store import (
-    StableHashSparseEncoder,
+    SparseEncoder,
     build_user_documents_filter,
     build_user_filter,
+    create_sparse_encoder,
 )
 from model.usage import UsageCallback, emit_usage, usage_from_response
 
@@ -22,12 +26,16 @@ from .schemas import (
     CollectionName,
     NodeError,
     ReflectionResult,
+    RerankAdapterResult,
     RetrievalAdapterResult,
     RetrievalPlan,
     RetrievalQueryRewrite,
     RetrievedChunk,
 )
 from .settings import RagSettings
+
+_BACKGROUND_CLEANUP_TASKS: set[asyncio.Task[Any]] = set()
+logger = logging.getLogger(__name__)
 
 
 class LlmAdapter(Protocol):
@@ -39,6 +47,7 @@ class LlmAdapter(Protocol):
         user_prompt: str,
         *,
         reasoning_effort: str | None = None,
+        usage_stage: str = "answer_generation",
     ) -> str:
         """Return model output for a grounded prompt."""
 
@@ -56,10 +65,10 @@ class EmbeddingAdapter(Protocol):
 
 
 class QueryRewriterAdapter(Protocol):
-    """Boundary for producing a standalone bilingual retrieval query."""
+    """Boundary for resolving one referential follow-up query."""
 
     async def rewrite(self, question: str) -> RetrievalQueryRewrite:
-        """Return four faithful generated retrieval forms."""
+        """Return one faithful standalone retrieval query."""
 
 
 class HybridRetrievalAdapter(Protocol):
@@ -85,8 +94,9 @@ class RerankerAdapter(Protocol):
         question: str,
         chunks: list[RetrievedChunk],
         limit: int,
-    ) -> list[RetrievedChunk]:
-        """Return chunks ordered by evidence quality."""
+        user_id: str,
+    ) -> RerankAdapterResult:
+        """Return validated chunks and an explicit evidence decision."""
 
 
 class GroundingEvaluatorAdapter(Protocol):
@@ -100,6 +110,95 @@ class GroundingEvaluatorAdapter(Protocol):
         cited_chunks: list[RetrievedChunk],
     ) -> ReflectionResult:
         """Return a structured claim-level grounding decision."""
+
+
+def _balanced_take(
+    chunks: list[RetrievedChunk],
+    collections: list[CollectionName],
+    limit: int,
+) -> list[RetrievedChunk]:
+    """Reserve equal pre-rerank capacity for every collection with hits.
+
+    Callers provide candidates in their final deterministic ranking. Configured
+    collection order decides quota allocation and interleaving; unused capacity
+    is backfilled in the caller's ranking rather than by an unrelated raw score.
+    """
+
+    if limit <= 0:
+        return []
+    configured_collections = list(dict.fromkeys(collections))
+    configured_set = set(configured_collections)
+    representatives: dict[tuple[str, str], RetrievedChunk] = {}
+    ordered_keys: list[tuple[str, str]] = []
+    for chunk in chunks:
+        if chunk.collection_name not in configured_set:
+            continue
+        key = (chunk.collection_name, chunk.chunk_id)
+        current = representatives.get(key)
+        if current is None:
+            ordered_keys.append(key)
+            representatives[key] = chunk
+        elif _retrieved_chunk_representative_key(
+            chunk
+        ) < _retrieved_chunk_representative_key(current):
+            representatives[key] = chunk
+    normalized_chunks = [representatives[key] for key in ordered_keys]
+    grouped = {
+        collection: [
+            chunk
+            for chunk in normalized_chunks
+            if chunk.collection_name == collection
+        ]
+        for collection in configured_collections
+    }
+    active = [
+        collection
+        for collection in configured_collections
+        if grouped[collection]
+    ]
+    if not active:
+        return []
+
+    base, remainder = divmod(limit, len(active))
+    quotas = {
+        collection: base + (1 if index < remainder else 0)
+        for index, collection in enumerate(active)
+    }
+    selected: list[RetrievedChunk] = []
+    selected_keys: set[tuple[str, str]] = set()
+    for rank in range(max(quotas.values(), default=0)):
+        for collection in active:
+            candidates = grouped[collection]
+            if rank >= quotas[collection] or rank >= len(candidates):
+                continue
+            chunk = candidates[rank]
+            selected.append(chunk)
+            selected_keys.add((chunk.collection_name, chunk.chunk_id))
+
+    remaining = [
+        chunk
+        for chunk in normalized_chunks
+        if (chunk.collection_name, chunk.chunk_id) not in selected_keys
+    ]
+    return [*selected, *remaining][:limit]
+
+
+def _retrieved_chunk_representative_key(chunk: RetrievedChunk) -> tuple:
+    """Return a total server-metadata ordering for duplicate retrieval hits."""
+
+    return (
+        -chunk.retrieval_score,
+        chunk.collection_name,
+        chunk.document_id,
+        chunk.chunk_id,
+        chunk.document_name,
+        chunk.document_type,
+        chunk.page_number if chunk.page_number is not None else -1,
+        chunk.slide_number if chunk.slide_number is not None else -1,
+        chunk.source_pipeline,
+        chunk.created_at or "",
+        chunk.model_dump_json(),
+    )
 
 
 @dataclass(frozen=True)
@@ -195,10 +294,18 @@ class FakeLlmAdapter:
         user_prompt: str,
         *,
         reasoning_effort: str | None = None,
+        usage_stage: str = "answer_generation",
     ) -> str:
         """Produce a deterministic answer from provided evidence lines."""
 
-        del reasoning_effort
+        del reasoning_effort, usage_stage
+        if "general model knowledge assistant" in system_prompt:
+            try:
+                payload = json.loads(user_prompt)
+            except json.JSONDecodeError:
+                payload = {}
+            question = str(payload.get("current_question", "")).strip()
+            return f"General model knowledge response for: {question}"
         if "helpful conversational assistant" in system_prompt:
             try:
                 payload = json.loads(user_prompt)
@@ -223,12 +330,19 @@ class FakeLlmAdapter:
                     return f"Earlier in this chat, you wrote: {quoted}"
                 return "There are no earlier user messages in this chat session."
             return f"I can help with your question: {current_message}"
-        evidence_lines = [line.strip() for line in user_prompt.splitlines() if re.match(r"^\[[^\]]+\]$", line.strip())]
-        if not evidence_lines:
+        try:
+            payload = json.loads(user_prompt)
+        except json.JSONDecodeError:
+            payload = {}
+        evidence = payload.get("document_evidence", [])
+        if not evidence:
             return "The uploaded documents do not contain enough evidence to answer this question."
-        chunk_marker = evidence_lines[0]
-        text_match = re.search(r"Source excerpt:\s*(.+)", user_prompt)
-        first_evidence = text_match.group(1).strip() if text_match else "the evidence supports the answer."
+        first = evidence[0]
+        metadata = first.get("server_owned_metadata", {})
+        chunk_marker = str(metadata.get("citation_marker", "")).strip()
+        first_evidence = str(first.get("untrusted_source_excerpt", "")).strip()
+        if not chunk_marker or not first_evidence:
+            return "The uploaded documents do not contain enough evidence to answer this question."
         return (
             "Based only on the retrieved document evidence, "
             f"{first_evidence} {chunk_marker}"
@@ -246,12 +360,15 @@ class FakeGroundingEvaluatorAdapter:
         cited_chunks: list[RetrievedChunk],
     ) -> ReflectionResult:
         del question
-        cited_ids = [chunk.chunk_id for chunk in cited_chunks]
+        cited_ids = [
+            chunk.evidence_id or chunk.chunk_id for chunk in cited_chunks
+        ]
         grounded = bool(draft_answer.strip() and cited_ids)
         return ReflectionResult(
             is_grounded=grounded,
             hallucination_risk="low" if grounded else "high",
             decision="accept" if grounded else "no_answer",
+            question_coverage="full" if grounded else "none",
             claims=(
                 [
                     ClaimEvaluation(
@@ -368,7 +485,11 @@ class FakeHybridRetrievalAdapter:
                 adjusted_score = min(1.0, chunk.retrieval_score + (overlap * 0.03))
             scored.append(chunk.model_copy(update={"retrieval_score": adjusted_score}))
         scored.sort(key=lambda item: item.retrieval_score, reverse=True)
-        return RetrievalAdapterResult(chunks=scored[: plan.top_k])
+        return RetrievalAdapterResult(
+            chunks=scored[: plan.candidate_k],
+            attempted_collections=list(plan.collections),
+            successful_collections=list(plan.collections),
+        )
 
 
 class NoOpRerankerAdapter:
@@ -380,11 +501,16 @@ class NoOpRerankerAdapter:
         question: str,
         chunks: list[RetrievedChunk],
         limit: int,
-    ) -> list[RetrievedChunk]:
-        """Return the first candidates without changing order."""
+        user_id: str,
+    ) -> RerankAdapterResult:
+        """Return the first owned candidates without changing order."""
 
         del question
-        return chunks[:limit]
+        selected = [chunk for chunk in chunks if chunk.user_id == user_id][:limit]
+        return RerankAdapterResult(
+            chunks=selected,
+            sufficient_evidence=bool(selected),
+        )
 
 
 class HeuristicRerankerAdapter:
@@ -396,18 +522,25 @@ class HeuristicRerankerAdapter:
         question: str,
         chunks: list[RetrievedChunk],
         limit: int,
-    ) -> list[RetrievedChunk]:
-        """Reorder chunks by token overlap and retrieval score."""
+        user_id: str,
+    ) -> RerankAdapterResult:
+        """Reorder owned chunks by token overlap and retrieval score."""
 
         question_terms = _meaningful_tokens(question)
         reranked = []
         for chunk in chunks:
+            if chunk.user_id != user_id:
+                continue
             chunk_terms = _meaningful_tokens(f"{chunk.text} {chunk.source_excerpt}")
             overlap = len(question_terms & chunk_terms)
             # Preserve semantic retrieval as the primary signal. Lexical overlap is
             # only a small tie-breaker because it is not reliable cross-lingually.
             rerank_score = chunk.retrieval_score + (min(overlap, 3) * 0.005)
-            reranked.append(chunk.model_copy(update={"rerank_score": min(1.0, rerank_score)}))
+            reranked.append(
+                chunk.model_copy(
+                    update={"rerank_score": min(1.0, rerank_score)}
+                )
+            )
         reranked.sort(
             key=lambda item: (
                 -item.fusion_score,
@@ -417,7 +550,11 @@ class HeuristicRerankerAdapter:
                 item.chunk_id,
             )
         )
-        return reranked[:limit]
+        selected = reranked[:limit]
+        return RerankAdapterResult(
+            chunks=selected,
+            sufficient_evidence=bool(selected),
+        )
 
 
 class OpenAIEmbeddingAdapter:
@@ -463,16 +600,13 @@ class OpenAIEmbeddingAdapter:
 
 
 class OpenAIQueryRewriterAdapter:
-    """Responses API adapter for four distinct generated retrieval queries."""
+    """Responses API adapter for one standalone referential query rewrite."""
 
     _SYSTEM_PROMPT = (
-        "Produce exactly four distinct retrieval forms for the supplied question; do "
-        "not answer it. standalone_query must resolve references while preserving the "
-        "user's language and intent. english_query must be a faithful English form. "
-        "keyword_query must preserve entities, filenames, symbols, numbers, and useful "
-        "technical terms for lexical retrieval. source_style_query must resemble a short "
-        "passage likely to occur in a relevant source, without asserting or introducing "
-        "facts absent from the question. All four values must be meaningfully distinct."
+        "Rewrite the supplied referential follow-up as one standalone document-search "
+        "query. Preserve the user's language, entities, filenames, symbols, numbers, "
+        "and intent. Do not answer the question, translate it, add facts, generate "
+        "keywords, or produce multiple alternatives."
     )
 
     def __init__(
@@ -496,7 +630,7 @@ class OpenAIQueryRewriterAdapter:
         self._usage_callback = usage_callback
 
     async def rewrite(self, question: str) -> RetrievalQueryRewrite:
-        """Return four structured generated query variants."""
+        """Return one structured standalone query."""
 
         response = await self._client.responses.parse(
             model=self._model,
@@ -504,7 +638,7 @@ class OpenAIQueryRewriterAdapter:
             instructions=self._SYSTEM_PROMPT,
             input=json.dumps({"question": question}, ensure_ascii=False),
             text_format=RetrievalQueryRewrite,
-            max_output_tokens=1_000,
+            max_output_tokens=300,
             timeout=self._timeout,
         )
         emit_usage(
@@ -553,6 +687,7 @@ class OpenAILlmAdapter:
         user_prompt: str,
         *,
         reasoning_effort: str | None = None,
+        usage_stage: str = "answer_generation",
     ) -> str:
         """Generate a response while safely ignoring unsupported reasoning effort."""
 
@@ -569,7 +704,7 @@ class OpenAILlmAdapter:
             self._usage_callback,
             usage_from_response(
                 response,
-                stage="answer_generation",
+                stage=usage_stage,
                 fallback_model=self._model,
             ),
         )
@@ -579,8 +714,29 @@ class OpenAILlmAdapter:
         return _extract_response_text(response)
 
 
+class GroundingEvaluationError(RuntimeError):
+    """Safe terminal error for an unusable structured grounding response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_status: str | None = None,
+        response_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.response_status = response_status
+        self.response_reason = response_reason
+
+
+class GroundingEvaluationRefusal(GroundingEvaluationError):
+    """Terminal policy refusal that must not be retried."""
+
+
 class OpenAIGroundingEvaluatorAdapter:
-    """Structured GPT-5.5 claim-evidence evaluator with no external knowledge."""
+    """Structured claim-evidence evaluator with bounded provider recovery."""
+
+    _SUPPORTED_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 
     _SYSTEM_PROMPT = (
         "You are a strict claim-evidence grounding evaluator. Evaluate only whether each factual "
@@ -590,8 +746,10 @@ class OpenAIGroundingEvaluatorAdapter:
         "that entire immediately preceding group; do not report each line as missing a citation "
         "solely because the marker is at the end of the group. The cited chunk must still support "
         "every factual item in that group. Report genuinely missing citations, unsupported claims, "
-        "and hallucination risk. Choose accept only when every material factual claim is directly "
-        "supported; otherwise choose no_answer or revise."
+        "and hallucination risk. Independently classify question_coverage as full when the grounded "
+        "draft answers the complete user question, partial when it safely answers only part, or none "
+        "when it provides no useful answer. Choose accept only when every material factual claim is "
+        "directly supported; otherwise choose no_answer or revise."
     )
 
     def __init__(
@@ -609,7 +767,15 @@ class OpenAIGroundingEvaluatorAdapter:
             client = AsyncOpenAI(**kwargs)
         self._client = client
         self._model = settings.self_service_llm_model
-        self._reasoning_effort = settings.self_service_reasoning_effort
+        reasoning_effort = settings.grounding_reasoning_effort.strip().casefold()
+        if reasoning_effort not in self._SUPPORTED_REASONING_EFFORTS:
+            raise ValueError(
+                f"Unsupported grounding reasoning effort: {settings.grounding_reasoning_effort}"
+            )
+        if not 0 <= settings.grounding_max_retries <= 3:
+            raise ValueError("grounding_max_retries must be between zero and three.")
+        self._reasoning_effort = reasoning_effort
+        self._max_retries = settings.grounding_max_retries
         self._timeout = settings.llm_request_timeout_seconds
         self._usage_callback = usage_callback
 
@@ -624,7 +790,7 @@ class OpenAIGroundingEvaluatorAdapter:
 
         evidence = [
             {
-                "chunk_id": chunk.chunk_id,
+                "chunk_id": chunk.evidence_id or chunk.chunk_id,
                 "document_name": chunk.document_name,
                 "location": chunk.display_location,
                 "collection": chunk.collection_name,
@@ -633,34 +799,106 @@ class OpenAIGroundingEvaluatorAdapter:
             }
             for chunk in cited_chunks
         ]
-        response = await self._client.responses.parse(
-            model=self._model,
-            reasoning={"effort": self._reasoning_effort},
-            instructions=self._SYSTEM_PROMPT,
-            input=json.dumps(
-                {
-                    "question": question,
-                    "draft_answer": draft_answer,
-                    "cited_evidence": evidence,
-                },
-                ensure_ascii=False,
-            ),
-            text_format=ReflectionResult,
-            max_output_tokens=4000,
-            timeout=self._timeout,
+        request_input = json.dumps(
+            {
+                "question": question,
+                "draft_answer": draft_answer,
+                "cited_evidence": evidence,
+            },
+            ensure_ascii=False,
         )
-        emit_usage(
-            self._usage_callback,
-            usage_from_response(
-                response,
-                stage="retrieval_grounding",
-                fallback_model=self._model,
-            ),
-        )
-        parsed = getattr(response, "output_parsed", None)
-        if parsed is None:
-            raise RuntimeError("OpenAI returned no parsed grounding evaluation.")
-        return parsed if isinstance(parsed, ReflectionResult) else ReflectionResult.model_validate(parsed)
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = await self._client.responses.parse(
+                    model=self._model,
+                    reasoning={"effort": self._reasoning_effort},
+                    instructions=self._SYSTEM_PROMPT,
+                    input=request_input,
+                    text_format=ReflectionResult,
+                    max_output_tokens=6000 * (attempt + 1),
+                    timeout=self._timeout,
+                )
+                emit_usage(
+                    self._usage_callback,
+                    usage_from_response(
+                        response,
+                        stage="retrieval_grounding",
+                        fallback_model=self._model,
+                        metadata={"attempt": attempt + 1},
+                    ),
+                )
+                parsed = getattr(response, "output_parsed", None)
+                if parsed is None:
+                    refusal = _extract_openai_refusal(response)
+                    status = _safe_response_field(response, "status")
+                    reason = _safe_incomplete_reason(response)
+                    if refusal:
+                        raise GroundingEvaluationRefusal(
+                            "OpenAI refused the grounding evaluation.",
+                            response_status=status,
+                            response_reason="refusal",
+                        )
+                    raise GroundingEvaluationError(
+                        "OpenAI returned no parsed grounding evaluation.",
+                        response_status=status,
+                        response_reason=reason or "missing_parsed_output",
+                    )
+                return (
+                    parsed
+                    if isinstance(parsed, ReflectionResult)
+                    else ReflectionResult.model_validate(parsed)
+                )
+            except asyncio.CancelledError:
+                raise
+            except GroundingEvaluationRefusal:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self._max_retries:
+                    break
+                logger.warning(
+                    "Retrying incomplete grounding evaluation.",
+                    extra={
+                        "event": "grounding_evaluation_retry",
+                        "attempt": attempt + 1,
+                        "max_attempts": self._max_retries + 1,
+                        "exception_type": type(exc).__name__,
+                        "provider_status": getattr(exc, "response_status", None),
+                        "provider_reason": getattr(exc, "response_reason", None),
+                    },
+                )
+        if isinstance(last_error, GroundingEvaluationError):
+            raise last_error
+        raise GroundingEvaluationError(
+            f"Grounding evaluation failed after {self._max_retries + 1} attempt(s)."
+        ) from last_error
+
+
+def _safe_response_field(response: object, name: str) -> str | None:
+    """Return one bounded provider status field without response content."""
+
+    value = getattr(response, name, None)
+    return str(value)[:100] if value is not None else None
+
+
+def _safe_incomplete_reason(response: object) -> str | None:
+    """Return the provider's bounded incomplete reason, when present."""
+
+    details = getattr(response, "incomplete_details", None)
+    reason = getattr(details, "reason", None)
+    return str(reason)[:100] if reason is not None else None
+
+
+def _extract_openai_refusal(response: object) -> str:
+    """Detect a refusal without logging or surfacing provider output text."""
+
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            refusal = getattr(content, "refusal", None)
+            if refusal:
+                return "refusal"
+    return ""
 
 
 class QdrantHybridRetrievalAdapter:
@@ -671,7 +909,7 @@ class QdrantHybridRetrievalAdapter:
         settings: RagSettings,
         *,
         client: Any | None = None,
-        sparse_encoder: StableHashSparseEncoder | None = None,
+        sparse_encoder: SparseEncoder | None = None,
     ) -> None:
         if client is None:
             from qdrant_client import AsyncQdrantClient
@@ -683,7 +921,15 @@ class QdrantHybridRetrievalAdapter:
         self._client = client
         self._dense_vector_name = settings.dense_vector_name
         self._sparse_vector_name = settings.sparse_vector_name
-        self._sparse_encoder = sparse_encoder or StableHashSparseEncoder()
+        self._sparse_encoder = (
+            sparse_encoder
+            if sparse_encoder is not None
+            else create_sparse_encoder(
+                settings.sparse_encoder_provider,
+                settings.sparse_encoder_model,
+                settings.sparse_encoder_cache_dir,
+            )
+        )
         self._allowed_document_ids = settings.allowed_document_ids
 
     async def retrieve(
@@ -699,16 +945,31 @@ class QdrantHybridRetrievalAdapter:
         from qdrant_client import models
 
         if self._allowed_document_ids == ():
-            return RetrievalAdapterResult()
-        user_filter = (
+            return RetrievalAdapterResult(
+                attempted_collections=list(plan.collections),
+                successful_collections=list(plan.collections),
+            )
+        owner_filter = (
             build_user_documents_filter(user_id, self._allowed_document_ids)
             if self._allowed_document_ids is not None
             else build_user_filter(user_id)
         )
-        sparse_vector = self._sparse_encoder.encode(query)
-        chunks: list[RetrievedChunk] = []
+        user_filter = models.Filter(
+            must=[
+                *(owner_filter.must or []),
+                models.FieldCondition(
+                    key="sparse_encoder_version",
+                    match=models.MatchValue(value=self._sparse_encoder.version),
+                ),
+            ]
+        )
+        sparse_vector = await asyncio.to_thread(
+            self._sparse_encoder.encode_query,
+            query,
+        )
+        chunks_by_collection: dict[CollectionName, list[RetrievedChunk]] = {}
         errors: list[NodeError] = []
-        collection_order = {name: index for index, name in enumerate(plan.collections)}
+        successful_collections: list[CollectionName] = []
 
         async def query_collection(collection: CollectionName):
             response = await self._client.query_points(
@@ -718,13 +979,13 @@ class QdrantHybridRetrievalAdapter:
                         query=dense_vector,
                         using=self._dense_vector_name,
                         filter=user_filter,
-                        limit=plan.top_k,
+                        limit=plan.prefetch_k,
                     ),
                     models.Prefetch(
                         query=sparse_vector,
                         using=self._sparse_vector_name,
                         filter=user_filter,
-                        limit=plan.top_k,
+                        limit=plan.prefetch_k,
                     ),
                 ],
                 query=models.RrfQuery(
@@ -735,7 +996,7 @@ class QdrantHybridRetrievalAdapter:
                         ),
                     )
                 ),
-                limit=plan.top_k,
+                limit=plan.collection_k,
                 with_payload=True,
                 with_vectors=False,
             )
@@ -747,41 +1008,90 @@ class QdrantHybridRetrievalAdapter:
         )
         for collection, outcome in zip(plan.collections, outcomes, strict=True):
             if isinstance(outcome, BaseException):
+                logger.warning(
+                    "Hybrid retrieval collection query failed.",
+                    extra={
+                        "event": "hybrid_retrieval_collection_failed",
+                        "exception_type": type(outcome).__name__,
+                        "collection": collection,
+                    },
+                )
                 errors.append(
                     NodeError(
                         node=f"hybrid_retrieval:{collection}",
-                        message=str(outcome),
+                        message="Retrieval failed.",
                     )
                 )
                 continue
             returned_collection, points = outcome
-            chunks.extend(
-                chunk
-                for chunk in _qdrant_hits_to_chunks(returned_collection, points)
-                if chunk.user_id == user_id
-                and (
-                    self._allowed_document_ids is None
-                    or chunk.document_id in self._allowed_document_ids
-                )
+            successful_collections.append(returned_collection)
+            owned_chunks: list[RetrievedChunk] = []
+            for hit_index, hit in enumerate(points):
+                try:
+                    chunk = _qdrant_hit_to_chunk(returned_collection, hit)
+                except Exception as exc:
+                    logger.warning(
+                        "Malformed retrieval payload was dropped.",
+                        extra={
+                            "event": "hybrid_retrieval_payload_dropped",
+                            "exception_type": type(exc).__name__,
+                            "collection": returned_collection,
+                            "result_index": hit_index,
+                        },
+                    )
+                    errors.append(
+                        NodeError(
+                            node=f"hybrid_retrieval:{returned_collection}:payload",
+                            message=(
+                                "Dropped malformed retrieval payload at result "
+                                f"index {hit_index}."
+                            ),
+                        )
+                    )
+                    continue
+                if chunk.user_id != user_id:
+                    continue
+                if (
+                    self._allowed_document_ids is not None
+                    and chunk.document_id not in self._allowed_document_ids
+                ):
+                    continue
+                if chunk.sparse_encoder_version != self._sparse_encoder.version:
+                    continue
+                owned_chunks.append(chunk)
+            deduplicated: dict[tuple[str, str], RetrievedChunk] = {}
+            for chunk in owned_chunks:
+                key = (chunk.collection_name, chunk.chunk_id)
+                current = deduplicated.get(key)
+                if current is None or _retrieved_chunk_representative_key(
+                    chunk
+                ) < _retrieved_chunk_representative_key(current):
+                    deduplicated[key] = chunk
+            ranked = sorted(
+                deduplicated.values(),
+                key=lambda item: (
+                    -item.retrieval_score,
+                    item.document_id,
+                    item.chunk_id,
+                ),
             )
-        deduplicated: dict[tuple[str, str], RetrievedChunk] = {}
-        for chunk in chunks:
-            key = (chunk.collection_name, chunk.chunk_id)
-            current = deduplicated.get(key)
-            if current is None or chunk.retrieval_score > current.retrieval_score:
-                deduplicated[key] = chunk
-        merged = list(deduplicated.values())
-        merged.sort(
-            key=lambda item: (
-                -item.retrieval_score,
-                collection_order.get(item.collection_name, len(collection_order)),
-                item.document_id,
-                item.chunk_id,
-            )
+            chunks_by_collection[returned_collection] = ranked[: plan.collection_k]
+
+        all_candidates = [
+            chunk
+            for collection in plan.collections
+            for chunk in chunks_by_collection.get(collection, [])
+        ]
+        balanced = _balanced_take(
+            all_candidates,
+            plan.collections,
+            plan.candidate_k,
         )
         return RetrievalAdapterResult(
-            chunks=merged[: plan.top_k],
+            chunks=balanced,
             errors=sorted(errors, key=lambda item: (item.node, item.message)),
+            attempted_collections=list(plan.collections),
+            successful_collections=sorted(set(successful_collections)),
         )
 
 
@@ -796,7 +1106,7 @@ def create_fake_adapters(settings: RagSettings | None = None) -> RagAdapters:
         retrieval=FakeHybridRetrievalAdapter(),
         reranker=(
             HeuristicRerankerAdapter()
-            if settings.reranker_provider == "heuristic"
+            if settings.effective_reranker_provider == "heuristic"
             else NoOpRerankerAdapter()
         ),
         grounding=FakeGroundingEvaluatorAdapter(),
@@ -816,83 +1126,228 @@ def create_openai_qdrant_adapters(
     settings = settings or RagSettings.from_env()
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY must be set before using real OpenAI adapters.")
-    owned_clients: list[Any] = []
-    if openai_client is None:
-        from openai import AsyncOpenAI
 
-        openai_kwargs = {"api_key": settings.openai_api_key}
-        if settings.openai_base_url:
-            openai_kwargs["base_url"] = settings.openai_base_url
-        openai_client = AsyncOpenAI(**openai_kwargs)
-        owned_clients.append(openai_client)
-    if qdrant_client is None:
-        from qdrant_client import AsyncQdrantClient
-
-        qdrant_client = AsyncQdrantClient(
-            url=settings.qdrant_url,
-            api_key=settings.qdrant_api_key,
+    reranker_provider = settings.effective_reranker_provider
+    if reranker_provider not in {"noop", "heuristic", "openai"}:
+        raise ValueError(
+            f"Unsupported reranker provider: {settings.reranker_provider!r}."
         )
-        owned_clients.append(qdrant_client)
-    reranker: RerankerAdapter
-    if settings.enable_reranker and settings.reranker_provider == "heuristic":
-        reranker = HeuristicRerankerAdapter()
+    sparse_encoder = create_sparse_encoder(
+        settings.sparse_encoder_provider,
+        settings.sparse_encoder_model,
+        settings.sparse_encoder_cache_dir,
+    )
+    openai_reranker_type = None
+    if reranker_provider == "openai":
+        from .rerankers import (
+            OpenAIRerankerAdapter,
+            validate_openai_reranker_settings,
+        )
+
+        validate_openai_reranker_settings(settings)
+        openai_reranker_type = OpenAIRerankerAdapter
+
+    owned_clients: list[Any] = []
+    try:
+        if openai_client is None:
+            from openai import AsyncOpenAI
+
+            openai_kwargs = {"api_key": settings.openai_api_key}
+            if settings.openai_base_url:
+                openai_kwargs["base_url"] = settings.openai_base_url
+            openai_client = AsyncOpenAI(**openai_kwargs)
+            owned_clients.append(openai_client)
+        if qdrant_client is None:
+            from qdrant_client import AsyncQdrantClient
+
+            qdrant_client = AsyncQdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key,
+            )
+            owned_clients.append(qdrant_client)
+        reranker: RerankerAdapter
+        if reranker_provider == "noop":
+            reranker = NoOpRerankerAdapter()
+        elif reranker_provider == "heuristic":
+            reranker = HeuristicRerankerAdapter()
+        else:
+            assert openai_reranker_type is not None
+            reranker = openai_reranker_type(
+                settings,
+                client=openai_client,
+                usage_callback=usage_callback,
+            )
+        return RagAdapters(
+            llm=OpenAILlmAdapter(
+                settings,
+                client=openai_client,
+                usage_callback=usage_callback,
+            ),
+            embedding=OpenAIEmbeddingAdapter(
+                settings,
+                client=openai_client,
+                usage_callback=usage_callback,
+            ),
+            retrieval=QdrantHybridRetrievalAdapter(
+                settings,
+                client=qdrant_client,
+                sparse_encoder=sparse_encoder,
+            ),
+            reranker=reranker,
+            grounding=OpenAIGroundingEvaluatorAdapter(
+                settings,
+                client=openai_client,
+                usage_callback=usage_callback,
+            ),
+            query_rewriter=OpenAIQueryRewriterAdapter(
+                settings,
+                client=openai_client,
+                usage_callback=usage_callback,
+            ),
+            _owned_clients=tuple(owned_clients),
+        )
+    except Exception:
+        _close_owned_clients_best_effort(owned_clients)
+        raise
+
+
+async def _await_client_closures(awaitables: list[Any]) -> None:
+    """Await client cleanup without allowing one failure to cancel another."""
+
+    await asyncio.gather(*awaitables, return_exceptions=True)
+
+
+async def _await_one_client_closure(awaitable: Any) -> None:
+    """Await one scheduled close operation without surfacing cleanup errors."""
+
+    try:
+        await awaitable
+    except Exception:
+        return
+
+
+def _close_owned_clients_best_effort(clients: list[Any]) -> None:
+    """Close now outside an event loop or schedule cleanup inside one."""
+
+    awaitables: list[Any] = []
+    seen: set[int] = set()
+    for client in clients:
+        identity = id(client)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        close = getattr(client, "close", None)
+        if close is None:
+            close = getattr(client, "aclose", None)
+        if close is None:
+            continue
+        try:
+            result = close()
+        except Exception:
+            continue
+        if inspect.isawaitable(result):
+            awaitables.append(result)
+    if not awaitables:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(_await_client_closures(awaitables))
     else:
-        reranker = NoOpRerankerAdapter()
-    return RagAdapters(
-        llm=OpenAILlmAdapter(
-            settings,
-            client=openai_client,
-            usage_callback=usage_callback,
+        for awaitable in awaitables:
+            task = loop.create_task(_await_one_client_closure(awaitable))
+            _BACKGROUND_CLEANUP_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_CLEANUP_TASKS.discard)
+
+
+def _qdrant_hit_to_chunk(
+    collection_name: CollectionName,
+    hit: object,
+) -> RetrievedChunk:
+    """Validate one server payload without coercing malformed metadata."""
+
+    raw_payload = getattr(hit, "payload", None)
+    if not isinstance(raw_payload, Mapping):
+        raise ValueError("Retrieval payload must be a mapping.")
+    payload = dict(raw_payload)
+    document_type = _required_payload_text(payload, "document_type")
+    if document_type not in {"pdf", "docx", "pptx"}:
+        raise ValueError("Retrieval payload has an invalid document type.")
+    page_number = _optional_positive_payload_int(payload, "page_number")
+    slide_number = _optional_positive_payload_int(payload, "slide_number")
+    if document_type == "pptx":
+        if slide_number is None or page_number is not None:
+            raise ValueError("PPTX retrieval payload has an invalid location.")
+    elif page_number is None or slide_number is not None:
+        raise ValueError("Document retrieval payload has an invalid location.")
+
+    score_value = getattr(hit, "score", None)
+    if isinstance(score_value, bool) or not isinstance(score_value, (int, float)):
+        raise ValueError("Retrieval payload has an invalid score.")
+    score = float(score_value)
+    if not math.isfinite(score):
+        raise ValueError("Retrieval payload has a non-finite score.")
+
+    collection_type = _optional_payload_text(payload, "collection_type")
+    created_at = _optional_payload_text(payload, "created_at")
+    return RetrievedChunk(
+        user_id=_required_payload_text(payload, "user_id"),
+        document_id=_required_payload_text(payload, "document_id"),
+        document_name=_required_payload_text(payload, "document_name"),
+        document_type=document_type,
+        page_number=page_number,
+        slide_number=slide_number,
+        chunk_id=_required_payload_text(payload, "chunk_id"),
+        collection_name=collection_name,
+        collection_type=collection_type,
+        sparse_encoder_version=_required_payload_text(
+            payload,
+            "sparse_encoder_version",
         ),
-        embedding=OpenAIEmbeddingAdapter(
-            settings,
-            client=openai_client,
-            usage_callback=usage_callback,
-        ),
-        retrieval=QdrantHybridRetrievalAdapter(settings, client=qdrant_client),
-        reranker=reranker,
-        grounding=OpenAIGroundingEvaluatorAdapter(
-            settings,
-            client=openai_client,
-            usage_callback=usage_callback,
-        ),
-        query_rewriter=OpenAIQueryRewriterAdapter(
-            settings,
-            client=openai_client,
-            usage_callback=usage_callback,
-        ),
-        _owned_clients=tuple(owned_clients),
+        source_pipeline=_required_payload_text(payload, "source_pipeline"),
+        source_excerpt=_required_payload_text(payload, "source_excerpt"),
+        text=_required_payload_text(payload, "text"),
+        retrieval_score=min(1.0, max(0.0, score)),
+        created_at=created_at,
     )
 
 
-def _qdrant_hits_to_chunks(
-    collection_name: CollectionName, hits: list[object]
-) -> list[RetrievedChunk]:
-    chunks = []
-    for hit in hits:
-        payload = dict(getattr(hit, "payload", {}) or {})
-        chunks.append(
-            RetrievedChunk(
-                user_id=str(payload.get("user_id", "")),
-                document_id=str(payload.get("document_id", "")),
-                document_name=str(payload.get("document_name", "")),
-                document_type=str(payload.get("document_type", "")),
-                page_number=payload.get("page_number"),
-                slide_number=payload.get("slide_number"),
-                chunk_id=str(payload.get("chunk_id", getattr(hit, "id", ""))),
-                collection_name=collection_name,
-                collection_type=payload.get("collection_type"),
-                source_pipeline=str(payload.get("source_pipeline", "")),
-                source_excerpt=str(payload.get("source_excerpt", "")),
-                text=str(payload.get("text", payload.get("content", ""))),
-                retrieval_score=min(
-                    1.0,
-                    max(0.0, float(getattr(hit, "score", 0.0) or 0.0)),
-                ),
-                created_at=payload.get("created_at"),
-            )
-        )
-    return chunks
+def _required_payload_text(payload: Mapping[str, Any], field_name: str) -> str:
+    """Return one non-empty string field or raise a content-free error."""
+
+    value = payload.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Retrieval payload field {field_name!r} is invalid.")
+    return value
+
+
+def _optional_payload_text(
+    payload: Mapping[str, Any],
+    field_name: str,
+) -> str | None:
+    """Validate one optional string without converting arbitrary values."""
+
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Retrieval payload field {field_name!r} is invalid.")
+    return value
+
+
+def _optional_positive_payload_int(
+    payload: Mapping[str, Any],
+    field_name: str,
+) -> int | None:
+    """Validate one optional one-based page or slide number."""
+
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"Retrieval payload field {field_name!r} is invalid.")
+    return value
 
 
 def _extract_response_text(response: object) -> str:

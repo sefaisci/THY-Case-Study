@@ -16,6 +16,7 @@ import {
   formatCitationLocation,
   formatRetrievalScore,
 } from "../../lib/format";
+import { EvidenceExcerpt } from "./EvidenceExcerpt";
 
 export interface InlineCitationProps {
   index: number;
@@ -28,7 +29,7 @@ interface PreviewPosition {
   placement: "above" | "below";
 }
 
-const PREVIEW_WIDTH = 352;
+const PREVIEW_WIDTH = 390;
 const PREVIEW_HEIGHT_FALLBACK = 180;
 const VIEWPORT_GUTTER = 12;
 const PREVIEW_GAP = 10;
@@ -37,7 +38,9 @@ export function InlineCitation({ index, citation }: InlineCitationProps) {
   const previewId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const previewRef = useRef<HTMLElement>(null);
-  const [hovered, setHovered] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const [triggerHovered, setTriggerHovered] = useState(false);
+  const [previewHovered, setPreviewHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [position, setPosition] = useState<PreviewPosition>({
@@ -45,7 +48,21 @@ export function InlineCitation({ index, citation }: InlineCitationProps) {
     top: VIEWPORT_GUTTER,
     placement: "below",
   });
-  const visible = hovered || focused || pinned;
+  const visible = triggerHovered || previewHovered || focused || pinned;
+
+  const cancelScheduledClose = useCallback(() => {
+    if (closeTimerRef.current === null) return;
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  }, []);
+
+  const scheduleTriggerClose = useCallback(() => {
+    cancelScheduledClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setTriggerHovered(false);
+      closeTimerRef.current = null;
+    }, 100);
+  }, [cancelScheduledClose]);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -87,10 +104,15 @@ export function InlineCitation({ index, citation }: InlineCitationProps) {
   }, [updatePosition, visible]);
 
   useEffect(() => {
+    return () => cancelScheduledClose();
+  }, [cancelScheduledClose]);
+
+  useEffect(() => {
     if (!visible) return undefined;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      setHovered(false);
+      setTriggerHovered(false);
+      setPreviewHovered(false);
       setPinned(false);
       triggerRef.current?.blur();
     };
@@ -125,8 +147,11 @@ export function InlineCitation({ index, citation }: InlineCitationProps) {
         aria-label={label}
         aria-describedby={visible ? previewId : undefined}
         aria-expanded={pinned}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+        onMouseEnter={() => {
+          cancelScheduledClose();
+          setTriggerHovered(true);
+        }}
+        onMouseLeave={scheduleTriggerClose}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onClick={() => setPinned((current) => !current)}
@@ -141,6 +166,12 @@ export function InlineCitation({ index, citation }: InlineCitationProps) {
               role="tooltip"
               className={`citation-preview citation-preview--${position.placement}`}
               style={previewStyle}
+              onMouseEnter={() => {
+                cancelScheduledClose();
+                setTriggerHovered(false);
+                setPreviewHovered(true);
+              }}
+              onMouseLeave={() => setPreviewHovered(false)}
             >
               <div className="citation-preview__header">
                 <span>Source {index}</span>
@@ -156,7 +187,7 @@ export function InlineCitation({ index, citation }: InlineCitationProps) {
                   {citation.ingestion_method === "semantic" ? "Semantic" : "Docling fixed"}
                 </span>
               </div>
-              <p>{citation.source_excerpt}</p>
+              <EvidenceExcerpt compact>{citation.source_excerpt}</EvidenceExcerpt>
             </aside>,
             document.body,
           )

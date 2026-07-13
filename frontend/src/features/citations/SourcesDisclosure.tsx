@@ -7,6 +7,7 @@ import {
   formatCitationLocation,
   formatRetrievalScore,
 } from "../../lib/format";
+import { EvidenceExcerpt } from "./EvidenceExcerpt";
 
 interface SourcesDisclosureProps {
   citations: CitationResponse[];
@@ -64,9 +65,9 @@ export function SourcesDisclosure({ citations }: SourcesDisclosureProps) {
                     {citation.source_collection}
                   </span>
                 </div>
-                <p className={excerptExpanded ? "source-card__excerpt--expanded" : ""}>
+                <EvidenceExcerpt compact={!excerptExpanded} expanded={excerptExpanded}>
                   {citation.source_excerpt}
-                </p>
+                </EvidenceExcerpt>
                 {citation.source_excerpt.length > 360 ? (
                   <button
                     type="button"

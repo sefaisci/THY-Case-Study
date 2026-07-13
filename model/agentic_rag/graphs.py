@@ -13,6 +13,8 @@ from .adapters import RagAdapters, create_fake_adapters
 from .nodes import (
     RagNodeSet,
     route_after_answer,
+    route_after_general_generation,
+    route_after_grounding_reflection,
     route_after_query_understanding,
     route_after_retrieval,
 )
@@ -38,7 +40,7 @@ def _as_async(function: Callable[[RagState], Any]):
 
 
 def build_retrieval_subgraph(nodes: RagNodeSet):
-    """Build five-way async query map, deterministic fusion, and reranking."""
+    """Build adaptive one-or-two-query mapping, fusion, and reranking."""
 
     builder = StateGraph(RagState)
     builder.add_node("retrieval_planner", _as_async(nodes.retrieval_planner))
@@ -48,6 +50,10 @@ def build_retrieval_subgraph(nodes: RagNodeSet):
         _as_async(nodes.fuse_variant_results),
     )
     builder.add_node("reranking", nodes.reranking)
+    builder.add_node(
+        "retrieval_outcome_classification",
+        _as_async(nodes.retrieval_outcome_classification),
+    )
     builder.add_edge(START, "retrieval_planner")
     builder.add_conditional_edges(
         "retrieval_planner",
@@ -56,7 +62,8 @@ def build_retrieval_subgraph(nodes: RagNodeSet):
     )
     builder.add_edge("retrieve_variant", "fuse_variant_results")
     builder.add_edge("fuse_variant_results", "reranking")
-    builder.add_edge("reranking", END)
+    builder.add_edge("reranking", "retrieval_outcome_classification")
+    builder.add_edge("retrieval_outcome_classification", END)
     return builder.compile(name="retrieval_subgraph")
 
 
@@ -67,10 +74,19 @@ def build_answer_subgraph(nodes: RagNodeSet):
     builder.add_node("answer_generation", nodes.answer_generation)
     builder.add_node("citation_validation", _as_async(nodes.citation_validation))
     builder.add_node("claim_evidence_reflection", nodes.claim_evidence_reflection)
+    builder.add_node("grounded_repair", nodes.grounded_repair)
     builder.add_edge(START, "answer_generation")
     builder.add_edge("answer_generation", "citation_validation")
     builder.add_edge("citation_validation", "claim_evidence_reflection")
-    builder.add_edge("claim_evidence_reflection", END)
+    builder.add_conditional_edges(
+        "claim_evidence_reflection",
+        _as_async(route_after_grounding_reflection),
+        {
+            "grounded_repair": "grounded_repair",
+            "end": END,
+        },
+    )
+    builder.add_edge("grounded_repair", "citation_validation")
     return builder.compile(name="answer_subgraph")
 
 
@@ -94,6 +110,15 @@ def build_rag_graph(
     builder.add_node("retrieval_subgraph", retrieval_subgraph)
     builder.add_node("answer_subgraph", answer_subgraph)
     builder.add_node("conversation_generation", nodes.conversation_generation)
+    builder.add_node(
+        "general_knowledge_generation",
+        nodes.general_knowledge_generation,
+    )
+    builder.add_node(
+        "compose_hybrid_response",
+        _as_async(nodes.compose_hybrid_response),
+    )
+    builder.add_node("explicit_no_answer", _as_async(nodes.explicit_no_answer))
     builder.add_node("final_response", _as_async(nodes.final_response))
 
     builder.add_edge(START, "query_understanding")
@@ -103,6 +128,7 @@ def build_rag_graph(
         {
             "retrieval_subgraph": "retrieval_subgraph",
             "conversation_generation": "conversation_generation",
+            "explicit_no_answer": "explicit_no_answer",
         },
     )
     builder.add_conditional_edges(
@@ -110,7 +136,8 @@ def build_rag_graph(
         _as_async(route_after_retrieval),
         {
             "answer_subgraph": "answer_subgraph",
-            "conversation_generation": "conversation_generation",
+            "general_knowledge_generation": "general_knowledge_generation",
+            "explicit_no_answer": "explicit_no_answer",
         },
     )
     builder.add_conditional_edges(
@@ -118,10 +145,21 @@ def build_rag_graph(
         _as_async(route_after_answer),
         {
             "final_response": "final_response",
-            "conversation_generation": "conversation_generation",
+            "general_knowledge_generation": "general_knowledge_generation",
+            "explicit_no_answer": "explicit_no_answer",
         },
     )
+    builder.add_conditional_edges(
+        "general_knowledge_generation",
+        _as_async(route_after_general_generation),
+        {
+            "compose_hybrid_response": "compose_hybrid_response",
+            "final_response": "final_response",
+        },
+    )
+    builder.add_edge("compose_hybrid_response", "final_response")
     builder.add_edge("conversation_generation", "final_response")
+    builder.add_edge("explicit_no_answer", "final_response")
     builder.add_edge("final_response", END)
 
     active_checkpointer = checkpointer

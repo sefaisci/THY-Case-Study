@@ -26,6 +26,11 @@ Each validated chunk includes:
 - a bounded citation-ready `source_excerpt`
 - confidence in the range `[0, 1]`
 
+Each page result also includes `page_classification`:
+
+- `content` requires one or more validated chunks.
+- `blank` requires zero chunks and an explicit summary or warning explaining that the complete image contains no meaningful legible information.
+
 Chunks form one flat list. Recursive nodes, nested semantic chunks, continuation notes, and memory fields are rejected by the schema.
 
 ## Constraints
@@ -33,8 +38,10 @@ Chunks form one flat list. Recursive nodes, nested semantic chunks, continuation
 - Do not include the entire document in every prompt.
 - Do not add previous-page summaries, continuation notes, chunk keys, titles, images, or full text.
 - Divide the visible content by meaning rather than a fixed token or character length.
-- Cover all meaningful visible content on the current page or slide without inventing content.
+- Inspect the complete image in reading order and cover meaningful headings, prose, lists, tables, equations, code, charts, diagrams, captions, and visible labels without inventing content.
 - Never persist base64 data in Qdrant or notebook outputs.
 - Reject duplicate keys, invalid page identity, empty chunk text, and invalid confidence.
 - Retry transient or invalid responses at most twice; persistent failure is not upserted.
 - Embed and upsert records in bounded batches so large documents do not retain every vector in memory.
+- After awaited upserts, retrieve every deterministic point ID from Qdrant and verify matching `user_id`, `document_id`, and `chunk_id` provenance.
+- Fail the document and remove partial owner/document points when analysis, embedding, upsert, or persistence verification is incomplete.

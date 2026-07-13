@@ -33,8 +33,8 @@ htmlcov/
 # Local virtual environments and generated document artifacts
 .venv/
 files/
-notebook/
-requirements-notebook.txt
+notebook/*
+!notebook/08_langgraph_rag_flow_sandbox.ipynb
 data/page_images/
 data/processing/
 data/empty_input_demo/

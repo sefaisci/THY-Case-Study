@@ -63,16 +63,57 @@ class Settings(BaseSettings):
     semantic_page_max_concurrency: int = Field(default=3, gt=0, le=32)
     document_max_concurrency: int = Field(default=2, gt=0, le=16)
     llm_request_timeout_seconds: int = 120
-    retrieval_top_k: int = 12
-    rerank_top_k: int = 6
-    max_context_chunks: int = 8
-    hybrid_dense_weight: float = 0.65
-    hybrid_sparse_weight: float = 0.35
+    sparse_encoder_provider: str = "stable_hash"
+    sparse_encoder_model: str = "Qdrant/bm25"
+    sparse_encoder_cache_dir: str | None = None
+    retrieval_prefetch_k: int = Field(default=20, gt=0, le=200)
+    retrieval_collection_k: int = Field(default=15, gt=0, le=100)
+    rerank_candidate_k: int = Field(default=30, gt=0, le=100)
+    rerank_top_k: int = Field(default=6, gt=0, le=30)
+    max_context_chunks: int = Field(default=8, gt=0, le=30)
+    hybrid_dense_weight: float = Field(default=0.65, ge=0.0)
+    hybrid_sparse_weight: float = Field(default=0.35, ge=0.0)
     enable_reranker: bool = True
-    reranker_provider: str = "heuristic"
-    no_answer_min_score: float = 0.20
-    citation_min_score: float = 0.20
+    reranker_provider: str = "openai"
+    reranker_model: str | None = None
+    reranker_reasoning_effort: str | None = "low"
+    reranker_max_candidates: int = Field(default=30, gt=0, le=100)
+    reranker_text_max_chars: int = Field(default=1600, gt=0, le=8000)
+    rerank_min_score: float = Field(default=0.50, ge=0.0, le=1.0)
+    reranker_allow_partial_support: bool = False
+    grounding_reasoning_effort: str = "low"
+    grounding_max_retries: int = Field(default=1, ge=0, le=3)
+    no_answer_min_score: float = Field(default=0.20, ge=0.0, le=1.0)
+    citation_min_score: float = Field(default=0.20, ge=0.0, le=1.0)
     max_session_history_messages: int = Field(default=20, ge=0, le=100)
+
+    @field_validator("reranker_reasoning_effort", mode="before")
+    @classmethod
+    def validate_reranker_reasoning_effort(cls, value: object) -> str | None:
+        """Normalize an optional supported OpenAI reasoning effort."""
+
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Reranker reasoning effort must be text or null.")
+        normalized = value.strip().casefold()
+        if not normalized:
+            return None
+        if normalized not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("Unsupported reranker reasoning effort.")
+        return normalized
+
+    @field_validator("grounding_reasoning_effort", mode="before")
+    @classmethod
+    def validate_grounding_reasoning_effort(cls, value: object) -> str:
+        """Normalize the independent structured grounding reasoning effort."""
+
+        if not isinstance(value, str):
+            raise ValueError("Grounding reasoning effort must be text.")
+        normalized = value.strip().casefold()
+        if normalized not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError("Unsupported grounding reasoning effort.")
+        return normalized
 
     @field_validator(
         "upload_dir",
