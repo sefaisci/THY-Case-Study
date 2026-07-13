@@ -967,8 +967,8 @@ textarea {
 .citation-preview {
   position: fixed;
   z-index: 100;
-  width: min(352px, calc(100vw - 24px));
-  max-height: min(320px, calc(100vh - 24px));
+  width: min(390px, calc(100vw - 24px));
+  max-height: min(420px, calc(100vh - 24px));
   padding: 14px;
   overflow: auto;
   color: var(--navy-700);
@@ -1033,15 +1033,160 @@ textarea {
   font-weight: 650;
 }
 
-.citation-preview p {
-  display: -webkit-box;
-  margin: 10px 0 0;
-  overflow: hidden;
+.evidence-excerpt {
+  min-width: 0;
+  margin-top: 10px;
+  overflow-wrap: anywhere;
   color: var(--navy-700);
   font-size: 0.72rem;
-  line-height: 1.55;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 6;
+  line-height: 1.58;
+}
+
+.evidence-excerpt--compact {
+  position: relative;
+  max-height: 10.5rem;
+  overflow: hidden;
+}
+
+.evidence-excerpt--compact::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1.35rem;
+  background: linear-gradient(transparent, var(--white));
+  content: "";
+  pointer-events: none;
+}
+
+.evidence-excerpt--expanded {
+  max-height: none;
+  overflow: visible;
+}
+
+.evidence-excerpt--expanded::after {
+  content: none;
+}
+
+.evidence-excerpt > :first-child,
+.evidence-excerpt > :first-child > :first-child {
+  margin-top: 0;
+}
+
+.evidence-excerpt > :last-child,
+.evidence-excerpt > :last-child > :last-child {
+  margin-bottom: 0;
+}
+
+.evidence-excerpt h1,
+.evidence-excerpt h2,
+.evidence-excerpt h3,
+.evidence-excerpt h4,
+.evidence-excerpt h5,
+.evidence-excerpt h6 {
+  margin: 0.72rem 0 0.32rem;
+  color: var(--navy-950);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.evidence-excerpt h1,
+.evidence-excerpt h2 {
+  padding-bottom: 0.24rem;
+  border-bottom: 1px solid var(--slate-150);
+}
+
+.evidence-excerpt p {
+  display: block;
+  margin: 0.38rem 0;
+  overflow: visible;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  -webkit-line-clamp: unset;
+}
+
+.evidence-excerpt ul,
+.evidence-excerpt ol {
+  margin: 0.38rem 0;
+  padding-left: 1.15rem;
+}
+
+.evidence-excerpt li + li {
+  margin-top: 0.2rem;
+}
+
+.evidence-excerpt blockquote {
+  margin: 0.5rem 0;
+  padding: 0.38rem 0.6rem;
+  color: var(--slate-700);
+  background: var(--slate-50);
+  border-left: 3px solid var(--thy-red);
+  border-radius: 0 6px 6px 0;
+}
+
+.evidence-excerpt code {
+  padding: 0.08rem 0.24rem;
+  color: #8b1d2c;
+  background: #fff1f2;
+  border: 1px solid #ffe0e3;
+  border-radius: 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
+.evidence-excerpt pre {
+  max-width: 100%;
+  margin: 0.5rem 0;
+  padding: 0.65rem;
+  overflow-x: auto;
+  color: #e5edf8;
+  background: #172033;
+  border: 1px solid #26344e;
+  border-radius: 8px;
+  line-height: 1.5;
+}
+
+.evidence-excerpt pre code {
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.evidence-excerpt table {
+  display: block;
+  max-width: 100%;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.evidence-excerpt th,
+.evidence-excerpt td {
+  padding: 0.3rem 0.42rem;
+  border: 1px solid var(--slate-200);
+  text-align: left;
+  vertical-align: top;
+}
+
+.evidence-excerpt th {
+  color: var(--navy-900);
+  background: var(--slate-50);
+}
+
+.evidence-excerpt a {
+  color: var(--blue);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.evidence-excerpt .katex-display {
+  max-width: 100%;
+  margin: 0.55rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .chat-loading {
@@ -1204,23 +1349,6 @@ textarea {
 
 .source-card__metadata span + span::before {
   content: none;
-}
-
-.source-card p {
-  display: -webkit-box;
-  margin: 8px 0 0;
-  overflow: hidden;
-  color: var(--navy-700);
-  font-size: 0.72rem;
-  line-height: 1.5;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-}
-
-.source-card p.source-card__excerpt--expanded {
-  display: block;
-  overflow: visible;
-  -webkit-line-clamp: unset;
 }
 
 .source-card__excerpt-toggle {
@@ -1742,42 +1870,6 @@ textarea {
   min-height: 34px;
   margin-top: 10px;
   font-size: 0.67rem;
-}
-
-.unavailable-models {
-  margin-top: 10px;
-  color: var(--slate-600);
-  background: var(--amber-soft);
-  border: 1px solid #ecd6a8;
-  border-radius: 7px;
-}
-
-.unavailable-models summary {
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 9px;
-  cursor: pointer;
-  font-size: 0.62rem;
-  font-weight: 680;
-  list-style: none;
-}
-
-.unavailable-models summary svg:last-child {
-  margin-left: auto;
-}
-
-.unavailable-models > div {
-  display: grid;
-  gap: 2px;
-  padding: 7px 9px;
-  border-top: 1px solid #ecd6a8;
-  font-size: 0.61rem;
-}
-
-.unavailable-models > div span {
-  line-height: 1.45;
 }
 
 .ingest-action-bar {

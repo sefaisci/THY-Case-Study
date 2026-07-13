@@ -152,7 +152,7 @@ async def create_connected_ingestion_coordinator(
 
     from model.document_processing.docling_pipeline import DoclingFixedChunkingPipeline
     from model.semantic_chunking import OpenAISemanticChunker, SemanticChunkingPipeline
-    from model.vector_store import OpenAIEmbedder, QdrantChunkStore, StableHashSparseEncoder
+    from model.vector_store import OpenAIEmbedder, QdrantChunkStore, create_sparse_encoder
     from openai import AsyncOpenAI
     from qdrant_client import AsyncQdrantClient
 
@@ -171,7 +171,11 @@ async def create_connected_ingestion_coordinator(
             api_key=settings.qdrant_api_key,
         )
         closeables.append(qdrant_client)
-        sparse_encoder = StableHashSparseEncoder()
+        sparse_encoder = create_sparse_encoder(
+            settings.sparse_encoder_provider,
+            settings.sparse_encoder_model,
+            settings.sparse_encoder_cache_dir,
+        )
         embedder = OpenAIEmbedder(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,

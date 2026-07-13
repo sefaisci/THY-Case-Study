@@ -7,23 +7,35 @@ graph TD;
 	__start__([<p>__start__</p>]):::first
 	query_understanding(query_understanding)
 	conversation_generation(conversation_generation)
+	general_knowledge_generation(general_knowledge_generation)
+	compose_hybrid_response(compose_hybrid_response)
+	explicit_no_answer(explicit_no_answer)
 	final_response(final_response)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> query_understanding;
-	answer_subgraph\3aclaim_evidence_reflection -.-> conversation_generation;
-	answer_subgraph\3aclaim_evidence_reflection -.-> final_response;
+	answer_subgraph\3a__end__ -.-> explicit_no_answer;
+	answer_subgraph\3a__end__ -.-> final_response;
+	answer_subgraph\3a__end__ -.-> general_knowledge_generation;
+	compose_hybrid_response --> final_response;
 	conversation_generation --> final_response;
+	explicit_no_answer --> final_response;
+	general_knowledge_generation -.-> compose_hybrid_response;
+	general_knowledge_generation -.-> final_response;
 	query_understanding -.-> conversation_generation;
+	query_understanding -.-> explicit_no_answer;
 	query_understanding -.-> retrieval_subgraph\3aretrieval_planner;
-	retrieval_subgraph\3areranking -.-> answer_subgraph\3aanswer_generation;
-	retrieval_subgraph\3areranking -.-> conversation_generation;
+	retrieval_subgraph\3aretrieval_outcome_classification -.-> answer_subgraph\3aanswer_generation;
+	retrieval_subgraph\3aretrieval_outcome_classification -.-> explicit_no_answer;
+	retrieval_subgraph\3aretrieval_outcome_classification -.-> general_knowledge_generation;
 	final_response --> __end__;
 	subgraph retrieval_subgraph
 	retrieval_subgraph\3aretrieval_planner(retrieval_planner)
 	retrieval_subgraph\3aretrieve_variant(retrieve_variant)
 	retrieval_subgraph\3afuse_variant_results(fuse_variant_results)
 	retrieval_subgraph\3areranking(reranking)
+	retrieval_subgraph\3aretrieval_outcome_classification(retrieval_outcome_classification)
 	retrieval_subgraph\3afuse_variant_results --> retrieval_subgraph\3areranking;
+	retrieval_subgraph\3areranking --> retrieval_subgraph\3aretrieval_outcome_classification;
 	retrieval_subgraph\3aretrieval_planner -.-> retrieval_subgraph\3aretrieve_variant;
 	retrieval_subgraph\3aretrieve_variant --> retrieval_subgraph\3afuse_variant_results;
 	end
@@ -31,8 +43,13 @@ graph TD;
 	answer_subgraph\3aanswer_generation(answer_generation)
 	answer_subgraph\3acitation_validation(citation_validation)
 	answer_subgraph\3aclaim_evidence_reflection(claim_evidence_reflection)
+	answer_subgraph\3agrounded_repair(grounded_repair)
+	answer_subgraph\3a__end__(<p>__end__</p>)
 	answer_subgraph\3aanswer_generation --> answer_subgraph\3acitation_validation;
 	answer_subgraph\3acitation_validation --> answer_subgraph\3aclaim_evidence_reflection;
+	answer_subgraph\3aclaim_evidence_reflection -. &nbsp;end&nbsp; .-> answer_subgraph\3a__end__;
+	answer_subgraph\3aclaim_evidence_reflection -.-> answer_subgraph\3agrounded_repair;
+	answer_subgraph\3agrounded_repair --> answer_subgraph\3acitation_validation;
 	end
 	classDef default fill:#FFF5F5,stroke:#C8102E,stroke-width:1.5px,color:#14213D,line-height:1.25
 	classDef first fill:#C8102E,stroke:#C8102E,color:#FFFFFF

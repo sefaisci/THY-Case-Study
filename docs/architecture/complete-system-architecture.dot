@@ -69,7 +69,7 @@ digraph thy_agentic_rag_system {
     color="#E2E8F0";
     style="rounded";
     ingestion_pipeline [label="Bounded async ingestion\nConcurrent documents + semantic pages\nSemantic or Docling chunking\nBatched embeddings + Qdrant upserts", fillcolor="#FFF5F5", color="#C8102E"];
-    rag_graph [label="Async LangGraph Agentic RAG\nGenerate exactly 5 query variants\nSend map → parallel retrieval → reducer\nRerank → answer → validate → reflect", fillcolor="#FFF5F5", color="#C8102E"];
+    rag_graph [label="Async LangGraph Agentic RAG\nOne verbatim + optional standalone query\nSend map → retrieval → reducer → rerank\nAnswer → validate → reflect → repair once\nGrounded / hybrid / labeled general", fillcolor="#FFF5F5", color="#C8102E"];
     fallback [label="Conversational fallback\nActive-session history only"];
     rag_graph -> fallback [style=dashed];
   }
@@ -80,7 +80,7 @@ digraph thy_agentic_rag_system {
     style="rounded";
     postgres [label="PostgreSQL 16\nAsync driver, row locks, partial unique index\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
     uploads [label="Persistent volume\nSources + render artifacts", shape=folder, fillcolor="#F8FAFC"];
-    qdrant [label="External Qdrant\nAsyncQdrantClient\n5 parallel owner-scoped searches\nsemantic_chunks + docling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
+    qdrant [label="External Qdrant\nAsyncQdrantClient\nOwner-scoped dense + sparse search\nsemantic_chunks + docling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
   }
 
   subgraph cluster_provider {
@@ -98,7 +98,7 @@ digraph thy_agentic_rag_system {
   document_service -> uploads [label="source files"];
   ingestion_pipeline -> qdrant [label="await batched owner-scoped upserts"];
   ingestion_pipeline -> openai [label="await Responses + embeddings"];
-  rag_graph -> qdrant [label="5 parallel searches\nmandatory owner filter"];
+  rag_graph -> qdrant [label="1 or 2 query variants\nmandatory owner filter"];
   rag_graph -> openai [label="await rewrite + answer"];
   usage_service -> openai [style=dashed];
 }

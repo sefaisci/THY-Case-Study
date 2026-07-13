@@ -465,4 +465,7 @@ class IngestionService:
             semantic_flush_batch_size=self.settings.semantic_flush_batch_size,
             semantic_page_max_concurrency=self.settings.semantic_page_max_concurrency,
             document_max_concurrency=self.settings.document_max_concurrency,
+            sparse_encoder_provider=self.settings.sparse_encoder_provider,
+            sparse_encoder_model=self.settings.sparse_encoder_model,
+            sparse_encoder_cache_dir=self.settings.sparse_encoder_cache_dir,
         )

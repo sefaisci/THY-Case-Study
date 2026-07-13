@@ -41,6 +41,9 @@ class IngestionSettings:
     semantic_flush_batch_size: int = 32
     semantic_page_max_concurrency: int = 3
     document_max_concurrency: int = 2
+    sparse_encoder_provider: str = "stable_hash"
+    sparse_encoder_model: str = "Qdrant/bm25"
+    sparse_encoder_cache_dir: str | None = None
 
     @classmethod
     def from_env(
@@ -88,4 +91,15 @@ class IngestionSettings:
                 3,
             ),
             document_max_concurrency=_integer("DOCUMENT_MAX_CONCURRENCY", 2),
+            sparse_encoder_provider=os.getenv(
+                "SPARSE_ENCODER_PROVIDER",
+                "stable_hash",
+            ),
+            sparse_encoder_model=os.getenv(
+                "SPARSE_ENCODER_MODEL",
+                "Qdrant/bm25",
+            ),
+            sparse_encoder_cache_dir=(
+                os.getenv("SPARSE_ENCODER_CACHE_DIR") or None
+            ),
         )

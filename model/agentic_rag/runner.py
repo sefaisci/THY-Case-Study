@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 
 from .adapters import RagAdapters, create_fake_adapters
 from .graphs import build_rag_graph
 from .schemas import CollectionScope, ConversationTurn, RagRequest, RagResponse, RagState
 from .settings import RagSettings
+
+
+def _checkpoint_thread_namespace(user_id: str, thread_id: str | None) -> str:
+    """Return an opaque checkpoint key scoped to one user and raw thread ID."""
+
+    raw_thread_id = thread_id or "notebook-thread"
+    namespace_input = json.dumps(
+        [user_id, raw_thread_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(namespace_input.encode("utf-8")).hexdigest()
 
 
 async def run_rag_question(
@@ -45,7 +59,15 @@ async def run_rag_question(
         "conversation_history": request.conversation_history,
         "errors": [],
     }
-    config = {"configurable": {"thread_id": thread_id or "notebook-thread", "user_id": user_id}}
+    config = {
+        "configurable": {
+            "thread_id": _checkpoint_thread_namespace(
+                request.user_id,
+                request.thread_id,
+            ),
+            "user_id": request.user_id,
+        }
+    }
     final_state = await graph.ainvoke(initial_state, config=config)
     response = final_state.get("response")
     if response is not None:

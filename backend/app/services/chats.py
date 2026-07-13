@@ -17,6 +17,7 @@ from model.agentic_rag import (
     create_openai_qdrant_adapters,
     run_rag_question,
 )
+from model.agentic_rag.schemas import RagResponse
 from model.usage import ModelUsage
 
 from ..config import Settings
@@ -36,12 +37,108 @@ from .usage import UsageService
 
 logger = logging.getLogger(__name__)
 
+_CHAT_USAGE_STAGES = (
+    "retrieval_query_rewrite",
+    "retrieval_embedding",
+    "retrieval_reranking",
+    "answer_generation",
+    "retrieval_grounding",
+    "grounded_repair",
+    "general_knowledge_generation",
+)
 _USAGE_STAGE_ORDER = {
-    "retrieval_query_rewrite": 0,
-    "retrieval_embedding": 1,
-    "answer_generation": 2,
-    "retrieval_grounding": 3,
+    stage: index for index, stage in enumerate(_CHAT_USAGE_STAGES)
 }
+_DOCUMENT_NO_ANSWER = (
+    "The uploaded documents do not contain enough evidence to answer this question."
+)
+_PARTIAL_RETRIEVAL_ERROR_NODES = (
+    "hybrid_retrieval",
+)
+_GENERIC_RAG_PROVIDER_ERROR = "The chat request could not be completed."
+
+
+def _is_partial_retrieval_error_node(node: str) -> bool:
+    return (
+        any(node.startswith(f"{base}:") for base in _PARTIAL_RETRIEVAL_ERROR_NODES)
+        and ":payload" not in node
+    )
+
+
+def _is_recoverable_rag_error_node(node: str) -> bool:
+    """Return whether a single Qdrant collection degraded safely."""
+
+    return _is_partial_retrieval_error_node(node)
+
+
+def _is_safe_document_no_answer(response: RagResponse) -> bool:
+    return (
+        response.no_answer
+        and response.answer.strip() == _DOCUMENT_NO_ANSWER
+        and not response.citations
+    )
+
+
+def _is_grounded_accepted_response(response: RagResponse) -> bool:
+    validation = response.citation_validation
+    reflection = response.reflection
+    return (
+        not response.no_answer
+        and bool(response.answer.strip())
+        and bool(response.citations)
+        and validation is not None
+        and validation.is_valid
+        and reflection is not None
+        and reflection.is_grounded
+        and reflection.decision == "accept"
+        and reflection.hallucination_risk != "high"
+        and not reflection.unsupported_claims
+        and not reflection.missing_citations
+    )
+
+
+def _is_general_knowledge_response(response: RagResponse) -> bool:
+    """Recognize only the server-labeled, citation-free fallback contract."""
+
+    return (
+        not response.no_answer
+        and not response.citations
+        and response.citation_validation is None
+        and response.reflection is None
+        and response.answer.lstrip().startswith(
+            "> **Genel model bilgisi:** Aşağıdaki bölüm yüklediğiniz "
+            "belgelerde doğrulanmamıştır."
+        )
+    )
+
+
+def _validate_rag_response_error_policy(response: RagResponse) -> None:
+    """Reject fatal or inconsistently recovered graph errors with a generic API error."""
+
+    if not response.errors:
+        return
+    all_recoverable = all(
+        _is_recoverable_rag_error_node(error.node)
+        for error in response.errors
+    )
+    safe_no_answer = _is_safe_document_no_answer(response)
+    recovered_with_only_partial_retrieval_errors = (
+        (
+            _is_grounded_accepted_response(response)
+            or _is_general_knowledge_response(response)
+        )
+        and all(
+            _is_partial_retrieval_error_node(error.node)
+            for error in response.errors
+        )
+    )
+    if not all_recoverable or not (
+        safe_no_answer or recovered_with_only_partial_retrieval_errors
+    ):
+        raise ProviderError(
+            _GENERIC_RAG_PROVIDER_ERROR,
+            code="rag_provider_failure",
+        )
 
 
 # Every HTTP request receives its own ``ChatService`` and ``AsyncSession``, so
@@ -85,6 +182,14 @@ def _ordered_usage_events(events: list[ModelUsage]) -> list[ModelUsage]:
             event.model,
             event.request_id or "",
         ),
+    )
+
+
+def _missing_usage_stages(recorded_stages: set[str]) -> tuple[str, ...]:
+    """Return chat stages that need explicit not-applicable records."""
+
+    return tuple(
+        stage for stage in _CHAT_USAGE_STAGES if stage not in recorded_stages
     )
 
 
@@ -192,16 +297,9 @@ class ChatService:
                 conversation_history=history,
             )
             if response.errors:
-                failure_summary = "; ".join(
-                    f"{item.node}: {item.message}" for item in response.errors
-                )[:1000]
-                if response.no_answer or not response.answer.strip():
-                    raise ProviderError(
-                        f"The chat request could not be completed. {failure_summary}",
-                        code="rag_provider_failure",
-                    )
+                _validate_rag_response_error_policy(response)
                 logger.warning(
-                    "A RAG stage failed, but the graph returned a successful fallback response.",
+                    "A RAG stage failed, but the graph returned a safe terminal response.",
                     extra={
                         "event": "rag_stage_recovered",
                         "user_id": user_id,
@@ -225,7 +323,16 @@ class ChatService:
                 for item in response.citations
             ]
             actual_model = next(
-                (event.model for event in events if event.stage == "answer_generation"),
+                (
+                    event.model
+                    for event in events
+                    if event.stage
+                    in {
+                        "answer_generation",
+                        "grounded_repair",
+                        "general_knowledge_generation",
+                    }
+                ),
                 request.chat_model,
             )
             chat = await self._owned_session(user_id, session_id)
@@ -258,22 +365,16 @@ class ChatService:
                 chat_message_id=assistant_message.id,
             )
             recorded_stages = {item.stage for item in request_records}
-            for stage in (
-                "retrieval_query_rewrite",
-                "retrieval_embedding",
-                "answer_generation",
-                "retrieval_grounding",
-            ):
-                if stage not in recorded_stages:
-                    request_records.append(
-                        await usage_service.record_not_applicable(
-                            user_id=user_id,
-                            operation="chat",
-                            stage=stage,
-                            chat_session_id=chat.id,
-                            chat_message_id=assistant_message.id,
-                        )
+            for stage in _missing_usage_stages(recorded_stages):
+                request_records.append(
+                    await usage_service.record_not_applicable(
+                        user_id=user_id,
+                        operation="chat",
+                        stage=stage,
+                        chat_session_id=chat.id,
+                        chat_message_id=assistant_message.id,
                     )
+                )
             usage_repository = UsageRepository(self.session)
             session_records = await usage_repository.list_for_user(user_id, session_id=chat.id)
             total_records = await usage_repository.list_for_user(user_id, limit=10_000)
@@ -299,15 +400,15 @@ class ChatService:
             if close is not None:
                 try:
                     await close()
-                except Exception:
+                except Exception as exc:
                     logger.warning(
                         "Async RAG provider clients could not be closed cleanly.",
                         extra={
                             "event": "rag_clients_close_failed",
+                            "exception_type": type(exc).__name__,
                             "user_id": user_id,
                             "chat_session_id": session_id,
                         },
-                        exc_info=True,
                     )
 
     async def _owned_session(self, user_id: str, session_id: str) -> ChatSession:
@@ -333,7 +434,12 @@ class ChatService:
             docling_collection=self.settings.qdrant_collection_docling,
             dense_vector_name=self.settings.qdrant_dense_vector_name,
             sparse_vector_name=self.settings.qdrant_sparse_vector_name,
-            retrieval_top_k=self.settings.retrieval_top_k,
+            sparse_encoder_provider=self.settings.sparse_encoder_provider,
+            sparse_encoder_model=self.settings.sparse_encoder_model,
+            sparse_encoder_cache_dir=self.settings.sparse_encoder_cache_dir,
+            retrieval_prefetch_k=self.settings.retrieval_prefetch_k,
+            retrieval_collection_k=self.settings.retrieval_collection_k,
+            rerank_candidate_k=self.settings.rerank_candidate_k,
             rerank_top_k=self.settings.rerank_top_k,
             max_context_chunks=self.settings.max_context_chunks,
             hybrid_dense_weight=self.settings.hybrid_dense_weight,
@@ -343,6 +449,16 @@ class ChatService:
             llm_request_timeout_seconds=self.settings.llm_request_timeout_seconds,
             enable_reranker=self.settings.enable_reranker,
             reranker_provider=self.settings.reranker_provider,
+            reranker_model=self.settings.reranker_model,
+            reranker_reasoning_effort=self.settings.reranker_reasoning_effort,
+            reranker_max_candidates=self.settings.reranker_max_candidates,
+            reranker_text_max_chars=self.settings.reranker_text_max_chars,
+            rerank_min_score=self.settings.rerank_min_score,
+            reranker_allow_partial_support=(
+                self.settings.reranker_allow_partial_support
+            ),
+            grounding_reasoning_effort=self.settings.grounding_reasoning_effort,
+            grounding_max_retries=self.settings.grounding_max_retries,
             allowed_document_ids=tuple(
                 await self.document_repository.list_retrievable_ids(user_id)
             ),

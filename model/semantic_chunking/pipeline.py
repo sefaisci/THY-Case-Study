@@ -15,11 +15,13 @@ from model.vector_store import (
     ChunkRecord,
     OpenAIEmbedder,
     QdrantChunkStore,
-    StableHashSparseEncoder,
+    SparseEncoder,
 )
 
 from .openai_adapter import OpenAISemanticChunker
 from .schemas import SemanticPageResult
+
+_MAX_CITATION_EXCERPT_CHARS = 2_000
 
 
 class SemanticChunkingPipeline:
@@ -32,14 +34,16 @@ class SemanticChunkingPipeline:
         chunker: OpenAISemanticChunker,
         embedder: OpenAIEmbedder,
         store: QdrantChunkStore,
-        sparse_encoder: StableHashSparseEncoder | None = None,
+        sparse_encoder: SparseEncoder | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
         self.settings = settings
         self.chunker = chunker
         self.embedder = embedder
         self.store = store
-        self.sparse_encoder = sparse_encoder or store.sparse_encoder
+        self.sparse_encoder = (
+            sparse_encoder if sparse_encoder is not None else store.sparse_encoder
+        )
         self.progress_callback = progress_callback
         if self.settings.semantic_flush_batch_size <= 0:
             raise ValueError("semantic_flush_batch_size must be greater than zero.")
@@ -82,12 +86,9 @@ class SemanticChunkingPipeline:
             processed_pages=0,
         )
 
-        buffered_records: list[ChunkRecord] = []
+        records: list[ChunkRecord] = []
         processed_locations = 0
         reported_locations = 0
-        chunk_count = 0
-        point_count = 0
-        storage_failed = False
         page_concurrency = self.settings.semantic_page_max_concurrency
         for start in range(0, len(pages), page_concurrency):
             page_batch = pages[start : start + page_concurrency]
@@ -107,8 +108,7 @@ class SemanticChunkingPipeline:
                     )
                     continue
                 page_records = self._map_records(source, user_id, result)
-                buffered_records.extend(page_records)
-                chunk_count += len(page_records)
+                records.extend(page_records)
                 processed_locations += 1
                 # Reserve the final location until every embedding and Qdrant
                 # write has succeeded. This prevents the UI from presenting
@@ -124,45 +124,73 @@ class SemanticChunkingPipeline:
                         processed_pages=visible_locations,
                     )
                     reported_locations = visible_locations
-                while len(buffered_records) >= self.settings.semantic_flush_batch_size:
-                    batch = buffered_records[: self.settings.semantic_flush_batch_size]
-                    del buffered_records[: self.settings.semantic_flush_batch_size]
-                    try:
-                        point_count += await self._flush_records(batch)
-                    except Exception as exc:
-                        failures.append(
-                            LocationFailure(
-                                location_number=page.location_number,
-                                message=f"Vector storage failed: {str(exc)[:900]}",
-                            )
-                        )
-                        storage_failed = True
-                        break
-                if storage_failed:
-                    break
-            if storage_failed:
-                break
-
-        if buffered_records and not storage_failed:
-            try:
-                point_count += await self._flush_records(list(buffered_records))
-                buffered_records.clear()
-            except Exception as exc:
-                failures.append(LocationFailure(message=f"Vector storage failed: {str(exc)[:900]}"))
-
+        chunk_count = len(records)
+        point_count = 0
         if chunk_count == 0:
             failures.append(
                 LocationFailure(message="Semantic chunking produced no chunks for this document.")
             )
-        if point_count != chunk_count:
+
+        optimistic_point_count = 0
+        if not failures:
+            for start in range(0, chunk_count, self.settings.semantic_flush_batch_size):
+                batch = records[start : start + self.settings.semantic_flush_batch_size]
+                try:
+                    optimistic_point_count += await self._flush_records(batch)
+                except Exception as exc:
+                    failures.append(
+                        LocationFailure(message=f"Vector storage failed: {str(exc)[:900]}")
+                    )
+                    break
+
+        if not failures and optimistic_point_count != chunk_count:
             failures.append(
                 LocationFailure(
                     message=(
                         "Semantic vector persistence is incomplete: "
-                        f"expected {chunk_count} point(s), stored {point_count}."
+                        f"expected {chunk_count} point(s), stored {optimistic_point_count}."
                     )
                 )
             )
+
+        if not failures:
+            try:
+                point_count = await self.store.verify_chunks_persisted(
+                    collection_name=self.settings.semantic_collection,
+                    chunks=records,
+                )
+            except Exception as exc:
+                failures.append(
+                    LocationFailure(
+                        message=f"Semantic vector verification failed: {str(exc)[:900]}"
+                    )
+                )
+
+        if not failures and point_count != chunk_count:
+            failures.append(
+                LocationFailure(
+                    message=(
+                        "Semantic vector verification is incomplete: "
+                        f"expected {chunk_count} point(s), verified {point_count}."
+                    )
+                )
+            )
+
+        if failures:
+            try:
+                await self.store.delete_user_document_points(
+                    collection_name=self.settings.semantic_collection,
+                    user_id=user_id,
+                    document_id=source.document_id,
+                )
+                point_count = 0
+            except Exception as exc:
+                failures.append(
+                    LocationFailure(
+                        message=f"Failed semantic-point cleanup was incomplete: {str(exc)[:900]}"
+                    )
+                )
+
         status = "completed" if not failures else "failed"
         if status == "completed":
             await report_progress(
@@ -221,7 +249,7 @@ class SemanticChunkingPipeline:
                     chunk_id=chunk_id,
                     chunk_index=index,
                     source_pipeline="semantic_image_chunking",
-                    source_excerpt=chunk.source_excerpt,
+                    source_excerpt=_citation_excerpt(chunk.text),
                     text=chunk.text,
                     created_at=created_at,
                     source_sha256=source.source_sha256,
@@ -234,6 +262,8 @@ class SemanticChunkingPipeline:
                         "relationships": chunk.relationships,
                         "confidence": chunk.confidence,
                         "page_summary": page_result.page_summary,
+                        "page_classification": page_result.page_classification,
+                        "model_source_excerpt": chunk.source_excerpt,
                         "semantic_model": self.settings.semantic_model,
                         "semantic_reasoning_effort": self.settings.semantic_reasoning_effort,
                     },
@@ -252,3 +282,22 @@ def _failed_document(source: DocumentSource, message: str) -> DocumentIngestionR
         status="failed",
         failures=[LocationFailure(message=message[:1000])],
     )
+
+
+def _citation_excerpt(text: str) -> str:
+    """Return the bounded evidence text actually exposed to grounded generation."""
+
+    normalized = text.strip()
+    if len(normalized) <= _MAX_CITATION_EXCERPT_CHARS:
+        return normalized
+
+    candidate = normalized[: _MAX_CITATION_EXCERPT_CHARS - 1]
+    minimum_boundary = int(_MAX_CITATION_EXCERPT_CHARS * 0.8)
+    boundary = max(
+        candidate.rfind("\n\n", minimum_boundary),
+        candidate.rfind("\n", minimum_boundary),
+        candidate.rfind(" ", minimum_boundary),
+    )
+    if boundary >= minimum_boundary:
+        candidate = candidate[:boundary]
+    return f"{candidate.rstrip()}…"

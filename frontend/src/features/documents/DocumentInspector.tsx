@@ -1,8 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle,
   CheckCircle2,
-  ChevronDown,
   File,
   FileText,
   LoaderCircle,
@@ -687,21 +685,6 @@ export function DocumentInspector({
               <RefreshCw className={isRefreshingModels ? "spin" : ""} size={15} aria-hidden="true" />
               Refresh model access
             </button>
-            {catalog && catalog.unavailable_models.length > 0 ? (
-              <details className="unavailable-models">
-                <summary>
-                  <AlertTriangle size={14} aria-hidden="true" />
-                  {catalog.unavailable_models.length} configured preview model(s) unavailable
-                  <ChevronDown size={14} aria-hidden="true" />
-                </summary>
-                {catalog.unavailable_models.map((model) => (
-                  <div key={model.id}>
-                    <strong>{model.display_name ?? model.id}</strong>
-                    <span>{model.unavailable_reason}</span>
-                  </div>
-                ))}
-              </details>
-            ) : null}
           </section>
 
           <div className="ingest-action-bar">

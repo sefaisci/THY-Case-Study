@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -25,13 +27,19 @@ class SemanticPageResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     page_number: int = Field(ge=1)
+    page_classification: Literal["content", "blank"]
     page_summary: str = Field(min_length=1, max_length=2000)
     chunks: list[SemanticChunk] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
-    def validate_unique_keys(self) -> "SemanticPageResult":
-        """Prevent ambiguous citation identifiers inside one location."""
+    def validate_page_contract(self) -> "SemanticPageResult":
+        """Require explicit page coverage and unambiguous chunk identifiers."""
+
+        if self.page_classification == "content" and not self.chunks:
+            raise ValueError("A content page must contain at least one semantic chunk.")
+        if self.page_classification == "blank" and self.chunks:
+            raise ValueError("A blank page must not contain semantic chunks.")
 
         keys = [chunk.chunk_key for chunk in self.chunks]
         if len(keys) != len(set(keys)):

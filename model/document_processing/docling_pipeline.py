@@ -16,7 +16,7 @@ from model.vector_store import (
     ChunkRecord,
     OpenAIEmbedder,
     QdrantChunkStore,
-    StableHashSparseEncoder,
+    SparseEncoder,
 )
 
 from .schemas import DocumentSource
@@ -68,14 +68,16 @@ class DoclingFixedChunkingPipeline:
         settings: IngestionSettings,
         embedder: OpenAIEmbedder,
         store: QdrantChunkStore,
-        sparse_encoder: StableHashSparseEncoder | None = None,
+        sparse_encoder: SparseEncoder | None = None,
         converter: Any | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
         self.settings = settings
         self.embedder = embedder
         self.store = store
-        self.sparse_encoder = sparse_encoder or store.sparse_encoder
+        self.sparse_encoder = (
+            sparse_encoder if sparse_encoder is not None else store.sparse_encoder
+        )
         self.converter = converter
         self.progress_callback = progress_callback
         self._conversion_lock = asyncio.Lock()

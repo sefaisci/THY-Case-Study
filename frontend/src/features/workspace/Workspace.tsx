@@ -224,7 +224,7 @@ export function Workspace() {
     },
     onError: (error, submission) => {
       if (useWorkspaceStore.getState().username === submission.username) {
-        showNotice(mutationError(error, "Answer generation failed"));
+        showNotice(mutationError(error, "Chat request failed"));
       }
     },
     onSettled: () => setPendingQuestion(null),

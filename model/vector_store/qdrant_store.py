@@ -14,7 +14,7 @@ from qdrant_client import AsyncQdrantClient, models
 from model.usage import UsageCallback, emit_usage, usage_from_response
 
 from .schemas import ChunkRecord
-from .sparse import StableHashSparseEncoder
+from .sparse import SparseEncoder, StableHashSparseEncoder
 
 
 _COLLECTION_LOCKS: weakref.WeakKeyDictionary[
@@ -158,7 +158,7 @@ class QdrantChunkStore:
         dense_vector_name: str,
         sparse_vector_name: str,
         dense_vector_size: int,
-        sparse_encoder: StableHashSparseEncoder | None = None,
+        sparse_encoder: SparseEncoder | None = None,
         client: Any | None = None,
     ) -> None:
         self._owns_client = client is None
@@ -166,7 +166,9 @@ class QdrantChunkStore:
         self.dense_vector_name = dense_vector_name
         self.sparse_vector_name = sparse_vector_name
         self.dense_vector_size = dense_vector_size
-        self.sparse_encoder = sparse_encoder or StableHashSparseEncoder()
+        self.sparse_encoder = (
+            sparse_encoder if sparse_encoder is not None else StableHashSparseEncoder()
+        )
         self._ready_collections: set[str] = set()
         self._close_lock = asyncio.Lock()
         self._closed = False
@@ -212,7 +214,11 @@ class QdrantChunkStore:
                         },
                         sparse_vectors_config={
                             self.sparse_vector_name: models.SparseVectorParams(
-                                modifier=models.Modifier.IDF
+                                modifier=(
+                                    models.Modifier.IDF
+                                    if self.sparse_encoder.requires_idf_modifier
+                                    else None
+                                )
                             )
                         },
                     )
@@ -233,6 +239,18 @@ class QdrantChunkStore:
             if self.sparse_vector_name not in sparse_vectors:
                 raise ValueError(
                     f"Collection {collection_name!r} is missing sparse vector {self.sparse_vector_name!r}."
+                )
+            sparse_config = sparse_vectors.get(self.sparse_vector_name)
+            modifier = getattr(sparse_config, "modifier", None)
+            if (
+                self.sparse_encoder.requires_idf_modifier
+                and modifier != models.Modifier.IDF
+            ):
+                raise ValueError(
+                    f"Collection {collection_name!r} sparse vector "
+                    f"{self.sparse_vector_name!r} must use the IDF modifier "
+                    "for FastEmbed BM25. Rebuild and reingest the collection "
+                    "before enabling the BM25 sparse encoder."
                 )
             await self._ensure_payload_indexes(collection_name)
             self._ready_collections.add(collection_name)
@@ -284,7 +302,9 @@ class QdrantChunkStore:
                     id=self.point_id(collection_name, chunk),
                     vector={
                         self.dense_vector_name: list(dense),
-                        self.sparse_vector_name: self.sparse_encoder.encode(chunk.text),
+                        self.sparse_vector_name: self.sparse_encoder.encode_document(
+                            chunk.text
+                        ),
                     },
                     payload=chunk.payload(),
                 )
@@ -312,6 +332,68 @@ class QdrantChunkStore:
             exact=True,
         )
         return int(response.count)
+
+    async def verify_chunks_persisted(
+        self,
+        *,
+        collection_name: str,
+        chunks: Sequence[ChunkRecord],
+        batch_size: int = 256,
+    ) -> int:
+        """Verify stable point IDs and owner/document provenance after an upsert."""
+
+        if not chunks:
+            raise ValueError("At least one chunk is required for persistence verification.")
+        if batch_size <= 0:
+            raise ValueError("Verification batch_size must be greater than zero.")
+
+        owner_documents = {(chunk.user_id, chunk.document_id) for chunk in chunks}
+        if len(owner_documents) != 1:
+            raise ValueError("Persistence verification chunks must share the same owner and document.")
+        if any(chunk.collection_name != collection_name for chunk in chunks):
+            raise ValueError("Persistence verification chunks must target the requested collection.")
+
+        expected = {
+            self.point_id(collection_name, chunk): chunk
+            for chunk in chunks
+        }
+        if len(expected) != len(chunks):
+            raise ValueError("Persistence verification received duplicate stable point IDs.")
+
+        retrieved: dict[str, object] = {}
+        expected_ids = list(expected)
+        for start in range(0, len(expected_ids), batch_size):
+            points = await self.client.retrieve(
+                collection_name=collection_name,
+                ids=expected_ids[start : start + batch_size],
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                retrieved[str(point.id)] = point
+
+        missing = set(expected).difference(retrieved)
+        if missing:
+            raise ValueError(
+                "Qdrant persistence verification is incomplete: "
+                f"expected {len(expected)} point(s), retrieved {len(retrieved)}, "
+                f"missing {len(missing)} point(s)."
+            )
+
+        for point_id, chunk in expected.items():
+            payload = getattr(retrieved[point_id], "payload", None) or {}
+            actual = (
+                payload.get("user_id"),
+                payload.get("document_id"),
+                payload.get("chunk_id"),
+            )
+            required = (chunk.user_id, chunk.document_id, chunk.chunk_id)
+            if actual != required:
+                raise ValueError(
+                    "Qdrant persistence provenance mismatch for "
+                    f"chunk {chunk.chunk_id!r}: expected {required!r}, received {actual!r}."
+                )
+        return len(retrieved)
 
     async def delete_user_document_points(
         self,
@@ -349,7 +431,13 @@ class QdrantChunkStore:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
 
     async def _ensure_payload_indexes(self, collection_name: str) -> None:
-        for field_name in ("user_id", "document_id", "document_type", "source_pipeline"):
+        for field_name in (
+            "user_id",
+            "document_id",
+            "document_type",
+            "source_pipeline",
+            "sparse_encoder_version",
+        ):
             try:
                 await self.client.create_payload_index(
                     collection_name=collection_name,

@@ -25,16 +25,26 @@ ARCHITECTURE_DIR = PROJECT_ROOT / "docs" / "architecture"
 
 LANGGRAPH_NODE_LABELS = {
     "__start__": "START",
-    "query_understanding": "Understand + rewrite query\nBuild exactly 5 variants",
+    "query_understanding": "Understand query\nOptional standalone rewrite",
+    "conversation_generation": "Session-history conversation",
+    "general_knowledge_generation": "Generate isolated general knowledge",
+    "compose_hybrid_response": "Compose grounded + general sections",
+    "explicit_no_answer": "Explicit document no-answer",
+    "final_response": "Build typed final response",
     "retrieval_subgraph:retrieval_planner": "Plan retrieval scope",
-    "retrieval_subgraph:retrieve_variant": "Retrieve one query variant\n5 dynamic Send workers",
+    "retrieval_subgraph:retrieve_variant": "Retrieve one query variant\n1 or 2 dynamic Send workers",
     "retrieval_subgraph:fuse_variant_results": "Fuse variant results\nDeterministic weighted RRF",
     "retrieval_subgraph:reranking": "Rerank evidence",
+    "retrieval_subgraph:retrieval_outcome_classification": (
+        "Classify retrieval outcome\nAnd fallback eligibility"
+    ),
     "answer_subgraph:answer_generation": "Generate grounded answer",
     "answer_subgraph:citation_validation": "Validate exact chunk citations",
-    "answer_subgraph:claim_evidence_reflection": "Evaluate claim grounding",
-    "conversation_generation": "Generate conversational fallback\nActive-session history only",
-    "final_response": "Build typed final response",
+    "answer_subgraph:claim_evidence_reflection": (
+        "Evaluate claim grounding\nAnd question coverage"
+    ),
+    "answer_subgraph:grounded_repair": "Repair grounded answer once",
+    "answer_subgraph:__end__": "Answer subgraph result",
     "__end__": "END",
 }
 
@@ -48,12 +58,13 @@ LANGGRAPH_EDGE_LABELS: dict[tuple[str, str], str | None] = {
         "document retrieval"
     ),
     ("query_understanding", "conversation_generation"): (
-        "history request / no documents"
+        "history request"
     ),
+    ("query_understanding", "explicit_no_answer"): "no accessible documents",
     (
         "retrieval_subgraph:retrieval_planner",
         "retrieval_subgraph:retrieve_variant",
-    ): "Send x5 query variants",
+    ): "Send x1 or x2",
     (
         "retrieval_subgraph:retrieve_variant",
         "retrieval_subgraph:fuse_variant_results",
@@ -64,11 +75,20 @@ LANGGRAPH_EDGE_LABELS: dict[tuple[str, str], str | None] = {
     ): None,
     (
         "retrieval_subgraph:reranking",
+        "retrieval_subgraph:retrieval_outcome_classification",
+    ): None,
+    (
+        "retrieval_subgraph:retrieval_outcome_classification",
         "answer_subgraph:answer_generation",
     ): "sufficient evidence",
-    ("retrieval_subgraph:reranking", "conversation_generation"): (
-        "insufficient evidence"
-    ),
+    (
+        "retrieval_subgraph:retrieval_outcome_classification",
+        "general_knowledge_generation",
+    ): "eligible empty evidence",
+    (
+        "retrieval_subgraph:retrieval_outcome_classification",
+        "explicit_no_answer",
+    ): "ineligible or fatal",
     (
         "answer_subgraph:answer_generation",
         "answer_subgraph:citation_validation",
@@ -79,36 +99,60 @@ LANGGRAPH_EDGE_LABELS: dict[tuple[str, str], str | None] = {
     ): None,
     (
         "answer_subgraph:claim_evidence_reflection",
-        "final_response",
-    ): "accepted + grounded",
+        "answer_subgraph:grounded_repair",
+    ): "repair once",
     (
         "answer_subgraph:claim_evidence_reflection",
-        "conversation_generation",
-    ): "rejected / no-answer",
+        "answer_subgraph:__end__",
+    ): "accepted or terminal",
+    (
+        "answer_subgraph:grounded_repair",
+        "answer_subgraph:citation_validation",
+    ): None,
+    ("answer_subgraph:__end__", "final_response"): "full grounded coverage",
+    (
+        "answer_subgraph:__end__",
+        "general_knowledge_generation",
+    ): "partial or eligible rejection",
+    ("answer_subgraph:__end__", "explicit_no_answer"): "ineligible or fatal",
     ("conversation_generation", "final_response"): None,
+    (
+        "general_knowledge_generation",
+        "compose_hybrid_response",
+    ): "grounded section exists",
+    ("general_knowledge_generation", "final_response"): "general or grounded",
+    ("compose_hybrid_response", "final_response"): None,
+    ("explicit_no_answer", "final_response"): None,
     ("final_response", "__end__"): None,
 }
 
 LANGGRAPH_CONDITIONAL_EDGES = {
     ("query_understanding", "retrieval_subgraph:retrieval_planner"),
     ("query_understanding", "conversation_generation"),
+    ("query_understanding", "explicit_no_answer"),
     (
         "retrieval_subgraph:retrieval_planner",
         "retrieval_subgraph:retrieve_variant",
     ),
     (
-        "retrieval_subgraph:reranking",
+        "retrieval_subgraph:retrieval_outcome_classification",
         "answer_subgraph:answer_generation",
     ),
-    ("retrieval_subgraph:reranking", "conversation_generation"),
     (
-        "answer_subgraph:claim_evidence_reflection",
-        "final_response",
+        "retrieval_subgraph:retrieval_outcome_classification",
+        "general_knowledge_generation",
     ),
     (
-        "answer_subgraph:claim_evidence_reflection",
-        "conversation_generation",
+        "retrieval_subgraph:retrieval_outcome_classification",
+        "explicit_no_answer",
     ),
+    ("answer_subgraph:claim_evidence_reflection", "answer_subgraph:grounded_repair"),
+    ("answer_subgraph:claim_evidence_reflection", "answer_subgraph:__end__"),
+    ("answer_subgraph:__end__", "final_response"),
+    ("answer_subgraph:__end__", "general_knowledge_generation"),
+    ("answer_subgraph:__end__", "explicit_no_answer"),
+    ("general_knowledge_generation", "compose_hybrid_response"),
+    ("general_knowledge_generation", "final_response"),
 }
 
 
@@ -138,7 +182,7 @@ class BrandPngDrawer(PngDrawer):
         elif node.startswith("answer_subgraph:"):
             fillcolor = "#F7FAFC"
             color = "#475569"
-        elif node == "conversation_generation":
+        elif node in {"conversation_generation", "general_knowledge_generation"}:
             fillcolor = "#FFF8E7"
             color = "#B45309"
 
@@ -154,7 +198,11 @@ class BrandPngDrawer(PngDrawer):
             fontsize=11,
             fontname=self.fontname,
             margin="0.16,0.10",
-            group="fallback" if node == "conversation_generation" else "primary",
+            group=(
+                "fallback"
+                if node in {"conversation_generation", "general_knowledge_generation"}
+                else "primary"
+            ),
         )
 
     def add_edge(
@@ -313,7 +361,7 @@ digraph thy_agentic_rag_system {
     color="#E2E8F0";
     style="rounded";
     ingestion_pipeline [label="Bounded async ingestion\nConcurrent documents + semantic pages\nSemantic or Docling chunking\nBatched embeddings + Qdrant upserts", fillcolor="#FFF5F5", color="#C8102E"];
-    rag_graph [label="Async LangGraph Agentic RAG\nGenerate exactly 5 query variants\nSend map → parallel retrieval → reducer\nRerank → answer → validate → reflect", fillcolor="#FFF5F5", color="#C8102E"];
+    rag_graph [label="Async LangGraph Agentic RAG\nOne verbatim + optional standalone query\nSend map → retrieval → reducer → rerank\nAnswer → validate → reflect → repair once\nGrounded / hybrid / labeled general", fillcolor="#FFF5F5", color="#C8102E"];
     fallback [label="Conversational fallback\nActive-session history only"];
     rag_graph -> fallback [style=dashed];
   }
@@ -324,7 +372,7 @@ digraph thy_agentic_rag_system {
     style="rounded";
     postgres [label="PostgreSQL 16\nAsync driver, row locks, partial unique index\nUsers, documents, jobs, chats, usage", shape=cylinder, fillcolor="#F8FAFC"];
     uploads [label="Persistent volume\nSources + render artifacts", shape=folder, fillcolor="#F8FAFC"];
-    qdrant [label="External Qdrant\nAsyncQdrantClient\n5 parallel owner-scoped searches\nsemantic_chunks + docling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
+    qdrant [label="External Qdrant\nAsyncQdrantClient\nOwner-scoped dense + sparse search\nsemantic_chunks + docling_fixed_chunks", shape=cylinder, fillcolor="#F8FAFC"];
   }
 
   subgraph cluster_provider {
@@ -342,7 +390,7 @@ digraph thy_agentic_rag_system {
   document_service -> uploads [label="source files"];
   ingestion_pipeline -> qdrant [label="await batched owner-scoped upserts"];
   ingestion_pipeline -> openai [label="await Responses + embeddings"];
-  rag_graph -> qdrant [label="5 parallel searches\nmandatory owner filter"];
+  rag_graph -> qdrant [label="1 or 2 query variants\nmandatory owner filter"];
   rag_graph -> openai [label="await rewrite + answer"];
   usage_service -> openai [style=dashed];
 }

@@ -1,0 +1,2 @@
+{"schema_version":"1.0","case_id":"synthetic-answerable-1","retrieved_chunk_ids":["synthetic-fastapi-1"],"reranked_chunk_ids":["synthetic-fastapi-1"],"citation_chunk_ids":["synthetic-fastapi-1"],"no_answer":false,"unauthorized_chunk_ids":[]}
+{"schema_version":"1.0","case_id":"synthetic-no-answer-1","retrieved_chunk_ids":[],"reranked_chunk_ids":[],"citation_chunk_ids":[],"no_answer":true,"unauthorized_chunk_ids":[]}
