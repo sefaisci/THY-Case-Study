@@ -133,7 +133,6 @@ class OpenAIRerankerAdapter:
                 ensure_ascii=False,
             ),
             "text_format": OpenAIRerankResult,
-            "max_output_tokens": 2_000,
             "timeout": self._timeout,
         }
         if self._reasoning_effort is not None:

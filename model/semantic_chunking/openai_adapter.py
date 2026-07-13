@@ -92,7 +92,6 @@ class OpenAISemanticChunker:
                         }
                     ],
                     text_format=SemanticPageResult,
-                    max_output_tokens=6000,
                     timeout=self.timeout_seconds,
                 )
                 emit_usage(

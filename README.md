@@ -381,6 +381,15 @@ POSTGRES_PASSWORD=local-dev-password
 
 Qdrant is intentionally not created by Compose. `QDRANT_URL` must be reachable from the backend container. A cloud HTTPS endpoint works directly; a Qdrant process on the Docker host can use `http://host.docker.internal:<port>`.
 
+OpenAI Responses requests do not set an application-level `max_output_tokens`
+value. This applies to semantic page analysis, query rewriting, evidence
+reranking, grounded and general answer generation, grounded repair, and the
+structured grounding evaluation. The selected model's native output capacity,
+context window, provider/account limits, structured-output schema, and
+`LLM_REQUEST_TIMEOUT_SECONDS` still apply. Retrieval candidate, context, and
+per-field schema bounds remain independent safety and quality controls; they are
+not output-token budgets.
+
 ### Retrieval stage limits and reranker controls
 
 The committed values are initial operating limits, not benchmark-derived optima:
@@ -539,7 +548,7 @@ It reports macro Recall@K over answerable cases with labeled relevant chunks, pe
 The synthetic fixture is a runner smoke test, not evidence of production answer quality. Measure candidate changes against a representative, human-labeled local set before describing them as accuracy or recall improvements.
 
 > [!NOTE]
-> The July 13, 2026 verification run passed all 319 Python tests outside the filesystem sandbox. The sandboxed runner can stall its `aiosqlite` worker during fixture setup, so SQLite-backed backend integration tests should run in a normal local/container process rather than treating that sandbox limitation as an application failure.
+> The July 13, 2026 verification run passed all 321 Python tests outside the filesystem sandbox. The sandboxed runner can stall its `aiosqlite` worker during fixture setup, so SQLite-backed backend integration tests should run in a normal local/container process rather than treating that sandbox limitation as an application failure.
 
 ```bash
 cd frontend

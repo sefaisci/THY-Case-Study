@@ -638,7 +638,6 @@ class OpenAIQueryRewriterAdapter:
             instructions=self._SYSTEM_PROMPT,
             input=json.dumps({"question": question}, ensure_ascii=False),
             text_format=RetrievalQueryRewrite,
-            max_output_tokens=300,
             timeout=self._timeout,
         )
         emit_usage(
@@ -816,7 +815,6 @@ class OpenAIGroundingEvaluatorAdapter:
                     instructions=self._SYSTEM_PROMPT,
                     input=request_input,
                     text_format=ReflectionResult,
-                    max_output_tokens=6000 * (attempt + 1),
                     timeout=self._timeout,
                 )
                 emit_usage(
