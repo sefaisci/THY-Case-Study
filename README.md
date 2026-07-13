@@ -47,9 +47,9 @@ The system supports two ingestion strategies, bounded concurrent multi-document 
 
 ## Complete system architecture
 
-<p align="center">
-  <img src="docs/architecture/complete-system-architecture.svg" alt="Complete system architecture showing frontend, FastAPI, model orchestration, persistence, Qdrant, and OpenAI" width="100%" />
-</p>
+[![Complete asynchronous system architecture showing the React frontend, FastAPI, PostgreSQL, Qdrant, LangGraph orchestration, ingestion, and OpenAI](docs/architecture/complete-system-architecture.png)](docs/architecture/complete-system-architecture.png)
+
+_Open the image for the full-resolution system view._
 
 The browser never supplies an internal user identifier. FastAPI resolves the logical username, establishes the tenant boundary, and passes the internal UUID into owner-scoped repositories and Qdrant filters. Source files remain in a persistent volume, relational state remains in PostgreSQL, and document chunks remain in the configured external Qdrant instance.
 
@@ -57,9 +57,9 @@ The editable Graphviz source and rendered PNG are stored beside the SVG in [`doc
 
 ## LangGraph Agentic RAG architecture
 
-<p align="center">
-  <img src="docs/architecture/langgraph-agentic-rag.png" alt="Expanded executable LangGraph Agentic RAG workflow with retrieval and answer subgraphs" width="100%" />
-</p>
+[![Expanded executable LangGraph Agentic RAG workflow with retrieval and answer subgraphs](docs/architecture/langgraph-agentic-rag.png)](docs/architecture/langgraph-agentic-rag.png)
+
+_Open the image for the full-resolution executable graph._
 
 The editable [`langgraph-agentic-rag.mmd`](docs/architecture/langgraph-agentic-rag.mmd) source and rendered PNG are generated from the executable graph. The generator asserts the complete expanded node/edge topology so documentation drift fails visibly.
 
