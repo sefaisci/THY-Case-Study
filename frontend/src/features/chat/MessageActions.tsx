@@ -1,8 +1,11 @@
-import { Check, Copy, TriangleAlert } from "lucide-react";
+import { Check, Copy, Timer, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+
+import { formatLatency } from "../../lib/format";
 
 interface MessageActionsProps {
   content: string;
+  latencyMs: number | null;
 }
 
 type CopyStatus = "idle" | "copied" | "failed";
@@ -47,7 +50,7 @@ async function writeClipboardText(content: string): Promise<void> {
   if (!copied) throw new Error("The browser rejected the copy operation.");
 }
 
-export function MessageActions({ content }: MessageActionsProps) {
+export function MessageActions({ content, latencyMs }: MessageActionsProps) {
   const [status, setStatus] = useState<CopyStatus>("idle");
   const resetTimerRef = useRef<number | null>(null);
 
@@ -73,6 +76,9 @@ export function MessageActions({ content }: MessageActionsProps) {
   }
 
   const statusLabel = status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : "";
+  const latencyLabel = latencyMs === null
+    ? "Response time unavailable"
+    : `Response time ${formatLatency(latencyMs)}`;
 
   return (
     <div className="message-actions">
@@ -88,6 +94,13 @@ export function MessageActions({ content }: MessageActionsProps) {
       </button>
       <span className="sr-only" role="status" aria-live="polite">
         {statusLabel}
+      </span>
+      <span
+        className="message-actions__latency"
+        title="End-to-end RAG processing time"
+      >
+        <Timer size={13} aria-hidden="true" />
+        <span>{latencyLabel}</span>
       </span>
     </div>
   );

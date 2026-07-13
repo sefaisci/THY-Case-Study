@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 import uuid
 import weakref
 from collections.abc import Callable
@@ -283,6 +284,7 @@ class ChatService:
         events: list[ModelUsage] = []
         adapters = None
         try:
+            rag_started_at = time.perf_counter()
             adapters = self.adapter_factory(
                 rag_settings,
                 usage_callback=events.append,
@@ -295,6 +297,10 @@ class ChatService:
                 settings=rag_settings,
                 collection_scope=request.collection_scope,
                 conversation_history=history,
+            )
+            latency_ms = max(
+                0,
+                round((time.perf_counter() - rag_started_at) * 1_000),
             )
             if response.errors:
                 _validate_rag_response_error_policy(response)
@@ -348,6 +354,7 @@ class ChatService:
                 citations=citations,
                 model=actual_model,
                 reasoning_effort=request.chat_reasoning_effort,
+                latency_ms=latency_ms,
             )
             if initial_title == "New chat" and chat.title == "New chat":
                 chat.title = request.question.strip()[:80]
@@ -382,6 +389,16 @@ class ChatService:
             session_totals = usage_service.totals(session_records)
             total_totals = usage_service.totals(total_records)
             await self.session.commit()
+            logger.info(
+                "Chat answer generated",
+                extra={
+                    "event": "chat_answer_generated",
+                    "user_id": user_id,
+                    "chat_session_id": chat.id,
+                    "chat_message_id": assistant_message.id,
+                    "latency_ms": latency_ms,
+                },
+            )
             return ChatTurnResponse(
                 user_message=ChatMessageResponse.model_validate(user_message),
                 assistant_message=ChatMessageResponse.model_validate(assistant_message),

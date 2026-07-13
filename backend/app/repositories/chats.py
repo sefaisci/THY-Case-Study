@@ -65,6 +65,7 @@ class ChatRepository:
         citations: list[dict] | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        latency_ms: int | None = None,
     ) -> ChatMessage:
         message = ChatMessage(
             session_id=session_id,
@@ -73,6 +74,7 @@ class ChatRepository:
             citations=citations or [],
             model=model,
             reasoning_effort=reasoning_effort,
+            latency_ms=latency_ms,
         )
         self.session.add(message)
         await self.session.flush()

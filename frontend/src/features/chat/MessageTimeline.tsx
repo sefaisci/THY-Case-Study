@@ -98,7 +98,7 @@ export function MessageTimeline({
                 message={message}
                 turn={turnUsageByMessage[message.id]}
               />
-              <MessageActions content={message.content} />
+              <MessageActions content={message.content} latencyMs={message.latency_ms} />
             </div>
           </article>
         ),

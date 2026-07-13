@@ -46,6 +46,7 @@ class ChatMessageResponse(BaseModel):
     citations: list[CitationResponse] = Field(default_factory=list)
     model: str | None = None
     reasoning_effort: str | None = None
+    latency_ms: int | None = Field(default=None, ge=0)
     created_at: datetime
 
 

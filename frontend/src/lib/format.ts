@@ -36,6 +36,22 @@ export function formatRetrievalScore(value: number): string {
   return Number.isFinite(value) ? value.toFixed(3) : "Not available";
 }
 
+export function formatLatency(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "Not available";
+  if (value < 1_000) return `${Math.round(value)} ms`;
+  const totalSeconds = value / 1_000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toLocaleString("en-US", {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    })} s`;
+  }
+  const roundedTotalSeconds = Math.round(totalSeconds);
+  const minutes = Math.floor(roundedTotalSeconds / 60);
+  const seconds = roundedTotalSeconds % 60;
+  return `${minutes} min ${seconds} s`;
+}
+
 export function formatCitationLocation(
   citation: Pick<CitationResponse, "page_number" | "slide_number">,
 ): string {

@@ -193,6 +193,7 @@ export interface ChatMessageResponse {
   citations: CitationResponse[];
   model: string | null;
   reasoning_effort: string | null;
+  latency_ms: number | null;
   created_at: string;
 }
 

@@ -1363,8 +1363,11 @@ textarea {
 
 .message-actions {
   display: flex;
+  width: 100%;
   min-height: 30px;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   margin-top: 10px;
 }
 
@@ -1386,6 +1389,23 @@ textarea {
   color: var(--navy-900);
   background: var(--slate-50);
   border-color: var(--slate-200);
+}
+
+.message-actions__latency {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: var(--slate-500);
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.message-actions__latency svg {
+  flex: 0 0 auto;
+  color: var(--slate-400);
 }
 
 /* Usage */

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
+    CheckConstraint,
     JSON,
     DateTime,
     Float,
@@ -142,6 +143,12 @@ class ChatSession(TimestampMixin, Base):
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="ck_chat_messages_latency_ms_nonnegative",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
     session_id: Mapped[str] = mapped_column(
@@ -152,6 +159,7 @@ class ChatMessage(Base):
     citations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     model: Mapped[str | None] = mapped_column(String(120))
     reasoning_effort: Mapped[str | None] = mapped_column(String(16))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, index=True, nullable=False
     )
